@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+root=$(pwd)
+core=${HERMES_SOURCE:-$HOME/.hermes/hermes-agent}
+uv=$(command -v uv)
+[ "$("$uv" --version | cut -d' ' -f2)" = 0.13.9 ] || { echo 'uv 0.13.9 required' >&2; exit 1; }
+mkdir -p .tools/home .tools/tmp
+cd "$root/hermes-adapter"
+exec env -i PATH=/usr/bin:/bin HOME="$root/.tools/home" TMPDIR="$root/.tools/tmp" \
+  UV_CACHE_DIR="$root/.tools/uv-cache" UV_DEFAULT_INDEX=https://pypi.org/simple \
+  UV_PYTHON_DOWNLOADS=never UV_PYTHON="$core/venv/bin/python" "$uv" --no-config "$@"

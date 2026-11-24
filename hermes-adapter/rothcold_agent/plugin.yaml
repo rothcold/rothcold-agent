@@ -1,0 +1,16 @@
+name: rothcold_agent
+label: Rothcold Agent
+kind: platform
+version: 0.1.0
+description: Single-owner chat adapter on IPv4 loopback.
+requires_env:
+  - name: ROTHCOLD_AGENT_ADAPTER_TOKEN
+    description: Platform adapter credential (at least 32 ASCII characters)
+    password: true
+  - name: ROTHCOLD_AGENT_ALLOWED_USERS
+    description: Set to owner for this private adapter
+    password: false
+optional_env:
+  - name: ROTHCOLD_AGENT_HOME_CHANNEL
+    description: Default thread UUID for cron and cross-platform delivery
+    password: false

@@ -1,0 +1,32 @@
+# Local credentials. Example files may contain placeholders only.
+.env
+.env.*
+*.env
+!.env.example
+!*.env.example
+
+# Private workspace state, including SQLite journals and WAL files.
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.sqlite-*
+
+# Local toolchains, dependencies and generated release artifacts.
+/.tools/
+/dist/
+/server/target/
+/server/static/
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+
+# Disposable gateway profiles, browser output and editor scratch files.
+/.test-*/
+/.gateway-*/
+/.screenshots/
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,30 @@
+{
+	"name": "rothcold-agent-ui",
+	"private": true,
+	"license": "Apache-2.0",
+	"version": "0.1.0",
+	"type": "module",
+	"packageManager": "pnpm@10.33.0",
+	"engines": {
+		"node": "24.13.0",
+		"pnpm": "10.33.0"
+	},
+	"scripts": {
+		"build": "node script/check-esbuild.mjs && vite build",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome lint .",
+		"format:check": "biome format .",
+		"test": "node --test ./*.test.mjs"
+	},
+	"dependencies": {
+		"react": "19.3.1",
+		"react-dom": "19.3.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.8",
+		"@types/react": "19.3.0",
+		"@types/react-dom": "19.3.0",
+		"typescript": "5.9.3",
+		"vite": "7.3.8"
+	}
+}

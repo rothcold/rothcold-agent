@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run only the pinned package manager, with no ambient credentials or npm config.
+set -eu
+cd "$(dirname "$0")/.."
+root=$(pwd)
+node=$(command -v node)
+[ "$("$node" -v)" = v24.13.0 ] || { echo 'Node v24.13.0 required' >&2; exit 1; }
+tools=$root/.tools
+mkdir -p "$tools/home" "$tools/tmp"
+if [ ! -f "$tools/pnpm/bin/pnpm.cjs" ]; then
+  archive=$(mktemp "$tools/tmp/pnpm.XXXXXXXX")
+  trap 'rm -f "$archive"' EXIT
+  env -i PATH=/usr/bin:/bin curl -q --fail --silent --show-error --proto '=https' \
+    https://registry.npmjs.org/pnpm/-/pnpm-10.33.0.tgz -o "$archive"
+  expected='EFaLtKavtYyes2MNqQzJUWQXq+vT+rvmc58K55VyjaFJHp21pUTHatjrdXD1xLs9bGN7LLQb/c20f6gjyGSTGQ=='
+  [ "$(openssl dgst -sha512 -binary "$archive" | openssl base64 -A)" = "$expected" ]
+  stage=$(mktemp -d "$tools/tmp/unpack.XXXXXXXX")
+  tar -xzf "$archive" -C "$stage" --no-same-owner
+  mv "$stage/package" "$tools/pnpm"
+  rmdir "$stage"
+  rm "$archive"
+fi
+cd "$root/web"
+exec env -i PATH="$(dirname "$node"):/usr/bin:/bin" HOME="$tools/home" TMPDIR="$tools/tmp" \
+  CI=true npm_config_userconfig=/dev/null npm_config_globalconfig=/dev/null \
+  npm_config_registry=https://registry.npmjs.org/ npm_config_ignore_scripts=true \
+  "$node" "$tools/pnpm/bin/pnpm.cjs" "$@"

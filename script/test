@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+root=$(pwd)
+core=${HERMES_SOURCE:-$HOME/.hermes/hermes-agent}
+py=$core/venv/bin/python
+tmp=$(mktemp -d "$root/.test-XXXXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/home" "$tmp/tmp" "$tmp/profile"
+script/pnpm format:check
+script/pnpm lint
+script/pnpm typecheck
+script/pnpm test
+script/build
+(cd server && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked)
+node --check server/static/app.js
+node --check tests/browser.cjs
+"$py" -I -S -X pycache_prefix="$tmp/bytecode" -m compileall -q -f -o 0 hermes-adapter/rothcold_agent tests script/stage-wheel.py
+"$py" -I -S -B script/stage-wheel.py dist/*.whl "$tmp/profile/plugins"
+install -m755 dist/rothcold-agent "$tmp/rothcold-agent"
+pw=''
+if command -v playwright >/dev/null && command -v chromium >/dev/null; then
+    pw=$(dirname "$(readlink -f "$(command -v playwright)")")
+fi
+shots=''
+if [ "${SCREENSHOTS:-0}" = 1 ]; then shots="$root/.screenshots"; mkdir -p "$shots"; fi
+env -i SHOTS="$shots" NODE="$(command -v node)" PLAYWRIGHT_DIR="$pw" CHROMIUM="$(command -v chromium || true)" PATH=/usr/bin:/bin HOME="$tmp/home" HERMES_HOME="$tmp/profile" TMPDIR="$tmp/tmp" \
+    HERMES_GATEWAY_LOCK_DIR="$tmp/run" HERMES_DISABLE_LAZY_INSTALLS=1 UV_OFFLINE=1 \
+    PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 PYTHONPATH="$tmp/profile/plugins:$core" "$py" -P -B -m unittest discover -s tests -v

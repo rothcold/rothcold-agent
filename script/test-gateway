@@ -1,0 +1,49 @@
+#!/bin/sh
+# Packaged smoke: no package installs, live profile, or external network.
+set -eu
+cd "$(dirname "$0")/.."
+root=$(pwd)
+core=${HERMES_SOURCE:-$HOME/.hermes/hermes-agent}
+command -v bwrap >/dev/null
+test -x "$core/venv/bin/python"
+test -x "$core/venv/bin/hermes"
+scratch=$(mktemp -d /tmp/hermes-rothcold-agent-gateway.XXXXXXXX)
+trap 'rm -rf -- "$scratch"' EXIT
+mkdir -m 700 "$scratch/home" "$scratch/profile" "$scratch/run" "$scratch/tmp"
+script/build
+"$core/venv/bin/python" -B -I -S script/stage-wheel.py dist/*.whl "$scratch/profile/plugins"
+install -m755 dist/rothcold-agent "$scratch/rothcold-agent"
+cp -r server/static "$scratch/expected-static"
+cat > "$scratch/profile/config.yaml" <<'YAML'
+plugins:
+  isolation: in_process
+  enabled: [rothcold_agent]
+gateway:
+  multiplex_profiles: false
+platforms:
+  rothcold_agent: {enabled: true}
+  api_server: {enabled: false}
+platform_toolsets:
+  rothcold_agent: []
+model:
+  provider: custom
+  default: local-fixture
+  api_mode: chat_completions
+  base_url: http://127.0.0.1:8767/v1
+auxiliary:
+  title_generation:
+    enabled: false
+YAML
+# Hide the real home (including the Hermes profile), except the read-only code/venv.
+set --
+if [ -e "$core/.env" ]; then set -- --ro-bind /dev/null "$core/.env"; fi
+bwrap --unshare-net --unshare-pid --die-with-parent --ro-bind / / --tmpfs "$HOME" \
+  --ro-bind "$core" "$core" "$@" --ro-bind "$root/tests" "$root/tests" \
+  --tmpfs /tmp --bind "$scratch" "$scratch" --dev /dev --proc /proc \
+  --chdir "$scratch" --clearenv --setenv PATH /usr/bin:/bin \
+  --setenv HOME "$scratch/home" --setenv HERMES_HOME "$scratch/profile" \
+  --setenv XDG_RUNTIME_DIR "$scratch/run" --setenv HERMES_GATEWAY_LOCK_DIR "$scratch/run" \
+  --setenv TMPDIR "$scratch/tmp" --setenv CORE "$core" --setenv ROOT "$root" \
+  --setenv PYTHONPATH "$core" --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HF_HUB_OFFLINE 1 \
+  --setenv UV_OFFLINE 1 --setenv HERMES_DISABLE_LAZY_INSTALLS 1 \
+  "$core/venv/bin/python" -B "$root/tests/real_gateway.py"

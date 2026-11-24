@@ -1,3 +1,4 @@
+mod approvals;
 mod store;
 
 use axum::{
@@ -25,6 +26,7 @@ const ORIGIN: &str = "http://127.0.0.1:8766";
 struct Platform {
     db: Mutex<Connection>,
     auth: Mutex<Auth>,
+    approvals: Mutex<approvals::Mailbox>,
     owner: String,
     bridge: String,
 }
@@ -207,7 +209,9 @@ async fn notifications(State(a): State<App>) -> Result<Json<Value>> {
     Ok(Json(store::notifications(&a.db.lock().unwrap())?))
 }
 async fn history(State(a): State<App>, Path(chat): Path<String>) -> Result<Json<Value>> {
-    Ok(Json(store::history(&a.db.lock().unwrap(), &chat)?))
+    let mut rows = store::history(&a.db.lock().unwrap(), &chat)?;
+    a.approvals.lock().unwrap().annotate(&chat, &mut rows);
+    Ok(Json(rows))
 }
 async fn rename(
     State(a): State<App>,
@@ -230,6 +234,12 @@ fn receipt((fresh, obj): (bool, Value)) -> (S, Json<Value>) {
 }
 async fn start(State(a): State<App>, Extension(v): Input) -> Result<(S, Json<Value>)> {
     let (id, text) = message(&v)?;
+    if approvals::is_control(text) {
+        return Err(Error(
+            S::CONFLICT,
+            "Approvals require a live prompt in an existing thread.",
+        ));
+    }
     let cat = if v.get("channel").is_none() {
         "general"
     } else {
@@ -249,6 +259,13 @@ async fn send_turn(
     Extension(v): Input,
 ) -> Result<(S, Json<Value>)> {
     let (id, text) = message(&v)?;
+    if approvals::is_control(text) {
+        a.approvals
+            .lock()
+            .unwrap()
+            .answer(&chat, v["approval"].as_str().unwrap_or(""), text)?;
+        return Ok((S::ACCEPTED, Json(json!({"id":id,"decision":"submitted"}))));
+    }
     Ok(receipt(store::enqueue(
         &mut a.db.lock().unwrap(),
         &chat,
@@ -258,10 +275,14 @@ async fn send_turn(
     )?))
 }
 async fn connect(State(a): State<App>) -> Result<Json<Value>> {
+    *a.approvals.lock().unwrap() = approvals::Mailbox::default();
     store::interrupt(&a.db.lock().unwrap())?;
     Ok(Json(json!({})))
 }
-async fn claim(State(a): State<App>) -> Result<Json<Value>> {
+async fn claim(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> {
+    if let Some(control) = a.approvals.lock().unwrap().poll(&v)? {
+        return Ok(Json(control));
+    }
     Ok(Json(store::claim(&mut a.db.lock().unwrap())?))
 }
 async fn admission(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> {
@@ -353,6 +374,7 @@ async fn main() -> std::io::Result<()> {
         .map_err(|e| std::io::Error::other(format!("Database setup failed: {e:?}")))?;
     let app = Arc::new(Platform {
         db: Mutex::new(db),
+        approvals: Mutex::default(),
         auth: Mutex::new(Auth {
             session: None,
             window: Instant::now(),

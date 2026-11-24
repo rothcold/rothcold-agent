@@ -389,6 +389,12 @@ article {
 	gap: 10px;
 	min-width: 0;
 }
+.approval-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 8px 0;
+}
 .progress-log {
 	margin: 0;
 	padding: 10px 12px;

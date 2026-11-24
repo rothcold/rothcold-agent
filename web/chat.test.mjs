@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pending, requestFor } from "./chat.ts";
+import { pending, replyDraft, requestFor } from "./chat.ts";
+
+test("a typed approval never moves to a newer prompt", () => {
+	const card = (id) => ({ updates: [{ id, choices: ["session"] }] });
+	const started = replyDraft("/", null, [card("first")]);
+	assert.equal(
+		replyDraft("/approve session", started, [card("second")]).approval,
+		"first",
+	);
+	assert.equal(
+		replyDraft("/approve session", null, [card("first"), card("second")])
+			.approval,
+		undefined,
+	);
+});
 
 test("resubmitting the same draft retains its UUID, changed input does not", () => {
 	const msg = requestFor("hello", null);

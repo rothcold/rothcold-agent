@@ -62,6 +62,7 @@ class RothcoldAgent(BasePlatformAdapter):
         super().__init__(config, Platform('rothcold_agent'))
         self.client = None
         self.worker = None
+        self._cards = {}
 
     async def connect(self, *, is_reconnect=False):
         if not ready():
@@ -81,6 +82,7 @@ class RothcoldAgent(BasePlatformAdapter):
         if self.client:
             await self.client.close()
             self.client = None
+        self._cards.clear()
         self._mark_disconnected()
 
     async def post(self, route, data):
@@ -99,11 +101,16 @@ class RothcoldAgent(BasePlatformAdapter):
                     if new_connection:
                         await self.post('connect', {})
                         new_connection = False
-                    row = await self.post('claim', {})
+                    cards = self._live_cards()
+                    row = await self.post('claim', {'approvals': cards} if cards else {})
+                    if row and 'approval' in row:
+                        await self._answer_card(row)
+                        continue
                     if row:
                         tasks.create_task(self.admit(row))
                         continue
                 except (ClientError, TimeoutError):
+                    self._cards.clear()
                     if not new_connection:
                         log.warning('Lost platform connection; pending delivery will not be replayed')
                     new_connection = True
@@ -126,12 +133,54 @@ class RothcoldAgent(BasePlatformAdapter):
                                    user_name='Owner', message_id=rid)
         event = MessageEvent(text=text, source=source, message_id=rid, user_id='owner',
                              allow_gateway_control=True)
+        if event.get_command() in ('approve', 'deny'):
+            # Legacy or noncanonical slash input must never resolve today's prompt.
+            await self.post('final', {'chat': chat, 'id': rid, 'text': 'Expired approval reply. Not sent to Hermes.'})
+            return True
         # The previous final can commit just before its Hermes session guard releases.
         previous = self._session_tasks.get(self._event_session_key(event))
         if previous is not None:
             await asyncio.wait({previous})
         await self.handle_message(event)
         return getattr(event, '_gateway_accepted', False)
+
+    async def _send_exec_approval_prompt(self, prompt):
+        if not prompt.request_id or not prompt.session_key or (prompt.metadata or {}).get('thread_id'):
+            return SendResult(success=False, error='Missing scoped approval request')
+        key = str(uuid4())
+        commands = {'once': '/approve', 'session': '/approve session', 'deny': '/deny'}
+        offered = [commands[c] for c in prompt.choices if c in commands]
+        text = (f'Hermes requests approval\n{prompt.description}\n\n{prompt.command}\n\n'
+                f'Reply before the request expires: {", ".join(offered)}')
+        if len(text) > self.MAX_MESSAGE_LENGTH:
+            return SendResult(success=False, error='Approval command does not fit in full')
+        result = await self._post_update(prompt.chat_id, None, key, 'progress', text)
+        if result and result.success:
+            self._cards[key] = prompt
+        return result or SendResult(success=False, error='No active turn for approval')
+
+    def _live_cards(self):
+        from tools.approval import ack_gateway_approval
+        cards = []
+        for key, p in list(self._cards.items()):
+            if ack_gateway_approval(p.session_key, p.request_id):
+                cards.append({'id': key, 'chat': p.chat_id,
+                              'choices': [c for c in p.choices if c in ('once', 'session', 'deny')]})
+            else:
+                self._cards.pop(key)
+        return cards
+
+    async def _answer_card(self, row):
+        from tools.approval import resolve_gateway_approval_card
+        key, choice = row['approval'], row['choice']
+        p = self._cards.get(key)
+        if not p or row['chat'] != p.chat_id or choice not in p.choices or choice not in ('once', 'session', 'deny'):
+            return
+        self._cards.pop(key)
+        count = resolve_gateway_approval_card(p.session_key, choice, p.request_id,
+                                              actor_id='owner', extra=self.config.extra)
+        status = f'Hermes received your decision: {choice}.' if count else 'Approval expired or not permitted. No decision applied.'
+        await self._post_update(p.chat_id, None, key, 'progress', f'{status}\n\n{p.command}')
 
     async def get_chat_info(self, chat_id):
         return {'name': chat_id, 'type': 'dm'}

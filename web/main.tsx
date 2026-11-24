@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client";
 import {
 	api,
 	pending,
+	replyDraft,
 	requestFor,
 	type Chat,
 	type Channel,
@@ -54,14 +55,39 @@ const statuses = {
 	unknown: "Outcome unknown. Later messages in this thread will wait.",
 	answered: "",
 };
-function ActivityList({ updates }: { updates: TurnUpdate[] }) {
+function ActivityList({
+	updates,
+	decide,
+}: {
+	updates: TurnUpdate[];
+	decide?: (id: string, text: string) => void;
+}) {
 	return (
 		<div className="activity-list">
 			{updates.map((u) =>
 				u.kind === "progress" ? (
-					<pre key={u.id} className="progress-log">
-						{u.text}
-					</pre>
+					<div key={u.id}>
+						<pre className="progress-log">{u.text}</pre>
+						{decide && u.choices && (
+							<div className="approval-actions">
+								{u.choices.map((c) => (
+									<button
+										type="button"
+										key={c}
+										onClick={() =>
+											decide(u.id, c === "deny" ? "/deny" : `/approve ${c}`)
+										}
+									>
+										{c === "deny"
+											? "Deny"
+											: c === "session"
+												? "Approve for session"
+												: "Approve once"}
+									</button>
+								))}
+							</div>
+						)}
+					</div>
 				) : (
 					<div key={u.id} className="interim-note">
 						<p className="interim-label">Hermes · update</p>
@@ -254,7 +280,23 @@ function Conversation({
 						)}
 						{t.answer === null ? (
 							<div className="assistant-turn">
-								{t.updates.length > 0 && <ActivityList updates={t.updates} />}
+								{t.updates.length > 0 && (
+									<ActivityList
+										updates={t.updates}
+										decide={async (approval, command) => {
+											try {
+												await api(path, session, {
+													id: crypto.randomUUID(),
+													text: command,
+													approval,
+												});
+												reload((n) => n + 1);
+											} catch (e) {
+												report(failure(e));
+											}
+										}}
+									/>
+								)}
 								<p className="status-line">
 									<small>
 										{t.state === "accepted" && t.updates.length > 0
@@ -311,7 +353,7 @@ function Conversation({
 						if (value)
 							drafts.set(
 								chat.id,
-								requestFor(value, drafts.get(chat.id) ?? null),
+								replyDraft(value, drafts.get(chat.id) ?? null, turns ?? []),
 							);
 						else drafts.delete(chat.id);
 					}}

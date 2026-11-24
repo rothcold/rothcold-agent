@@ -14,20 +14,22 @@ if not PROFILE.is_relative_to(ROOT) or not PROFILE.parent.name.startswith('.test
 
 
 def local_only(event, args):
-    if event in ('socket.connect', 'socket.bind') and not isinstance(args[1], str):
-        if args[1][0] not in ('127.0.0.1', '::1'):
-            raise AssertionError('Non-loopback socket refused')
+    if (event in ('socket.connect', 'socket.bind') and not isinstance(args[1], str)
+            and args[1][0] not in ('127.0.0.1', '::1')):
+        raise AssertionError('Non-loopback socket refused')
     if event == 'socket.getaddrinfo' and args[0] not in ('localhost', '127.0.0.1', '::1'):
         raise AssertionError('External lookup refused')
 
 
 sys.addaudithook(local_only)
-from aiohttp import ClientSession
-from gateway.config import PlatformConfig
-from gateway.platform_registry import platform_registry
-from hermes_cli.plugins import PluginManager
+# Load the HTTP client and gateway only after installing the loopback audit hook.
+from aiohttp import ClientSession  # noqa: E402
+from gateway.config import PlatformConfig  # noqa: E402
+from gateway.platform_registry import platform_registry  # noqa: E402
+from hermes_cli.plugins import PluginManager  # noqa: E402
 
 ORIGIN = 'http://127.0.0.1:8766'
+BROWSER_TMP = str(Path('/proc') / str(os.getpid()) / 'cwd' / PROFILE.parent.name / 'tmp')
 
 
 def setUpModule():
@@ -64,8 +66,10 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 5),
                          f'Rothcold Agent listening on {ORIGIN}\n'.encode())
         entry = platform_registry.get('rothcold_agent')
-        self.assertTrue(entry.check_fn())
-        self.adapter = platform_registry.create_adapter('rothcold_agent', PlatformConfig(enabled=True))
+        assert entry is not None and entry.check_fn()
+        adapter = platform_registry.create_adapter('rothcold_agent', PlatformConfig(enabled=True))
+        assert adapter is not None
+        self.adapter = adapter
         self.assertTrue(await self.adapter.connect())
         self.addAsyncCleanup(self.adapter.disconnect)
         self.client = ClientSession()
@@ -137,7 +141,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.message_id,'reply:'+req['id'])
         self.assertFalse((await self.adapter.edit_message(chat, progress.message_id, 'late edit')).success)
         inbox = ORIGIN+'/api/notifications'
-        event_row = dict(request=req['id'],chat=chat,channel='general',unread=1)
+        event_row = {'request':req['id'], 'chat':chat, 'channel':'general', 'unread':1}
         async def entries():
             return [row for row in await (await self.client.get(inbox, headers=self.auth)).json() if row['chat']==chat]
         for _ in range(2):
@@ -148,6 +152,15 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message_id, 'reply:'+req['id'])
         self.assertEqual(await entries(), [dict(event_row,unread=0)])
         self.assertEqual(len(calls), 1)
+
+    async def wait_for_fixture_approval(self, chat):
+        from tools.approval_gateway_wait import _await_gateway_decision
+
+        loop = asyncio.get_running_loop()
+        def notify(data):
+            card = self.adapter.send_exec_approval(chat, data['command'], chat, request_id=data['request_id'])
+            assert asyncio.run_coroutine_threadsafe(card, loop).result(4).success
+        return await asyncio.to_thread(_await_gateway_decision, chat, notify, {'command':'echo fixture'})
 
     @unittest.skipUnless(os.environ.get('PLAYWRIGHT_DIR'), 'No local Playwright + Chromium')
     async def test_browser(self):
@@ -164,6 +177,8 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
                 'Checks passed. Writing **summary** now.',
                 metadata={'_interim_send': True, 'reply_to_message_id': event.message_id},
             )
+            decision = await self.wait_for_fixture_approval(chat)
+            assert decision['choice'] == 'session'
             await release.wait()
             return (
                 '## Reading plan\n\n'
@@ -175,7 +190,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.adapter.set_message_handler(reply)
         p = await asyncio.create_subprocess_exec(os.environ['NODE'], str(ROOT/'tests/browser.cjs'),
                                                  stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                                                 env=dict(os.environ, TMPDIR=f'/proc/{os.getpid()}/cwd/{PROFILE.parent.name}/tmp'))
+                                                 env=dict(os.environ, TMPDIR=BROWSER_TMP))
         try:
             assert p.stdout is not None and p.stdin is not None
             self.assertEqual(await asyncio.wait_for(p.stdout.readline(), 45), b'closed\n')
@@ -196,13 +211,59 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
     async def test_browser_offline(self):
         await self.adapter.disconnect()
         p = await asyncio.create_subprocess_exec(os.environ['NODE'], str(ROOT/'tests/browser.cjs'), '--offline',
-                env=dict(os.environ, TMPDIR=f'/proc/{os.getpid()}/cwd/{PROFILE.parent.name}/tmp'))
+                env=dict(os.environ, TMPDIR=BROWSER_TMP))
         try:
             self.assertEqual(await asyncio.wait_for(p.wait(), 45), 0)
         finally:
             if p.returncode is None:
                 p.kill()
                 await p.wait()
+
+    async def test_live_session_approval(self):
+        from unittest.mock import patch
+
+        calls = []
+        async def handler(event):
+            calls.append(event.text)
+            if len(calls) > 1:
+                return 'Next task done.'
+            decision = await self.wait_for_fixture_approval(event.source.chat_id)
+            return 'Decision: ' + str(decision['choice'])
+
+        self.adapter.set_message_handler(handler)
+        await self.login()
+        rid = str(uuid4())
+        path = f'/api/chats/{rid}/turns'
+        with patch('tools.approval_context._get_approval_timeout', return_value=15):
+            await self.post('/api/chats', {'id':rid, 'text':'Fixture approval'})
+            await self.post(path, {'id':str(uuid4()), 'text':'Next job'})
+            async with asyncio.timeout(8):
+                while not (cards := [u for u in (await self.get(path))[0]['updates'] if u.get('choices')]):
+                    await asyncio.sleep(.05)
+            self.assertEqual(calls, ['Fixture approval'])
+            answer = {'id':str(uuid4()), 'text':'/approve session', 'approval':cards[0]['id']}
+            self.assertEqual((await self.post('/api/chats/other/turns', answer)).status,409)
+            self.assertEqual((await self.post(path, dict(answer, text='/approve always'))).status,400)
+            self.assertEqual((await self.post(path, answer)).status,202)
+            self.assertEqual((await self.post(path, answer)).status,409)
+            async with asyncio.timeout(8):
+                while (rows := await self.get(path))[-1]['state'] != 'answered':
+                    await asyncio.sleep(.05)
+            self.assertEqual([r['answer'] for r in rows], ['Decision: session','Next task done.'])
+            self.assertEqual(len(await self.get('/api/notifications')),2)
+            self.assertEqual((await self.post(path, answer)).status,409)
+
+    async def test_approval_is_not_a_fifo_turn(self):
+        await self.adapter.disconnect()
+        await self.login()
+        rid = str(uuid4())
+        path = f'/api/chats/{rid}/turns'
+        await self.post('/api/chats', {'id': rid, 'text': 'Needs a decision'})
+        await self.client.post(ORIGIN+'/adapter/claim', headers=self.bridge, json={})
+        await self.client.post(ORIGIN+'/adapter/admission', headers=self.bridge, json={'id':rid, 'accepted':True})
+        result = await self.post(path, {'id':str(uuid4()), 'text':'/approve session'})
+        self.assertEqual(result.status, 409, 'An unbound approval must not become a queued turn')
+        self.assertEqual(len(await self.get(path)), 1)
 
     async def test_interrupted_admission(self):
         chat = str(uuid4())
@@ -261,13 +322,13 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 201)
         channel = (await response.json())['id']
         listed = await (await self.client.get(ORIGIN+'/api/channels', headers=self.auth)).json()
-        self.assertIn(dict(id=channel,name='Research'), listed)
+        self.assertIn({'id':channel, 'name':'Research'}, listed)
         self.assertEqual((await self.post('/api/channels', {'name': 'research'})).status, 409)
         self.assertEqual((await self.post('/api/channels', {'name': ' '})).status, 400)
         async def reply(event):
             return 'Noted.'
         self.adapter.set_message_handler(reply)
-        msg = dict(id=str(uuid4()), text='  Task\n' + '读' * 100, channel=channel)
+        msg = {'id':str(uuid4()), 'text':'  Task\n' + '读' * 100, 'channel':channel}
         before = await self.get('/api/chats')
         self.assertEqual((await self.post('/api/chats', {'title':'Task'})).status, 400)
         self.assertEqual((await self.post('/api/chats', dict(msg,text=' '))).status, 400)
@@ -321,8 +382,8 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
 
     async def test_home_channel_push_and_standalone_send(self):
         entry = platform_registry.get('rothcold_agent')
+        assert entry is not None and entry.standalone_sender_fn is not None
         self.assertEqual(entry.cron_deliver_env_var, 'ROTHCOLD_AGENT_HOME_CHANNEL')
-        self.assertIsNotNone(entry.standalone_sender_fn)
         seen = []
 
         async def reply(event):

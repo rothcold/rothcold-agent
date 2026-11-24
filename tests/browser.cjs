@@ -100,6 +100,17 @@ const path = require('node:path');
     await page.getByText('Accepted by Hermes.',{exact:false}).waitFor();
     await page.getByText('📖 Reading src/main.rs',{exact:false}).waitFor();
     await page.locator('.interim-note strong',{hasText:'summary'}).waitFor();
+    await page.getByRole('button',{name:'Approve for session'}).waitFor();
+    for (const width of [1100,375]) {
+      await page.setViewportSize({width,height:800});
+      await page.getByRole('button',{name:'Approve for session'}).scrollIntoViewIfNeeded();
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,`approval-${width}.png`)});
+    }
+    await page.getByLabel('Your message').fill('/approve session');
+    await page.getByRole('button',{name:'Send message'}).click();
+    await page.getByText('Hermes received your decision: session.',{exact:false}).waitFor();
+    assert.equal(await page.locator('article').count(),1);
     for (const width of [1100,375]) {
       await page.setViewportSize({width,height:800});
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -141,7 +152,7 @@ const path = require('node:path');
     await fresh.locator('.markdown pre code',{hasText:'fn main() {}'}).waitFor();
     await fresh.locator('.markdown table td',{hasText:'ok'}).waitFor();
     assert.equal(await fresh.locator('chapter').count(), 0);
-    await fresh.locator('.activity-details summary',{hasText:'Activity (2 updates)'}).waitFor();
+    await fresh.locator('.activity-details summary',{hasText:'Activity (3 updates)'}).waitFor();
     assert.equal(await fresh.locator('article').count(),1);
     await fresh.getByRole('link',{name:'Notifications 1 unread'}).waitFor();
     for (const width of [1100,375]) {

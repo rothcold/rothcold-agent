@@ -69,6 +69,12 @@ pub fn init(db: &mut Connection) -> Result<()> {
             PRAGMA user_version=3;",
         )?;
     }
+    // Old clients queued slash replies without the prompt ID. Never deliver those after an upgrade.
+    for row in rows(&tx, "SELECT id,text FROM turns WHERE state='queued'", [])? {
+        if super::approvals::is_control(row["text"].as_str().unwrap()) {
+            tx.execute("UPDATE turns SET state='answered',answer='Expired approval reply. Not sent to Hermes.' WHERE id=?", [row["id"].as_str()])?;
+        }
+    }
     tx.commit()?;
     Ok(())
 }

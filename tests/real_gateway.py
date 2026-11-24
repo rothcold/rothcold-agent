@@ -1,6 +1,18 @@
-import json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, time, urllib.error, urllib.request, uuid
+import json
+import os
+import pathlib
+import secrets
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
 home = pathlib.Path(os.environ.get('HERMES_HOME', '/')).resolve()
-if (home.name != 'profile' or home.parent.parent != pathlib.Path('/tmp')
+if (home.name != 'profile' or home.parent.parent != pathlib.Path('/tmp')  # noqa: S108 - fixed namespace mount in script/test-gateway
         or not home.parent.name.startswith('hermes-rothcold-agent-gateway.')
         or pathlib.Path(os.environ.get('HOME', '/')).resolve() != home.parent / 'home'):
     raise RuntimeError('Use script/test-gateway; refusing to run outside the disposable profile.')
@@ -15,9 +27,11 @@ platform_env = {'PATH':'/usr/bin:/bin', 'HOME':str(home.parent/'home'),
                 'ROTHCOLD_AGENT_ADAPTER_TOKEN':bridge}
 def request(path, data=None, token=None):
     headers = {'Origin': base}
-    if token: headers['Authorization'] = 'Bearer '+token
-    if data is not None: headers['Content-Type']='application/json'
-    req = urllib.request.Request(base+path, headers=headers, data=None if data is None else json.dumps(data).encode())
+    if token:
+        headers['Authorization'] = 'Bearer '+token
+    if data is not None:
+        headers['Content-Type']='application/json'
+    req = urllib.request.Request(base+path, headers=headers, data=None if data is None else json.dumps(data).encode())  # noqa: S310 - fixed loopback HTTP origin
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=3) as res:
         return res.status,json.load(res)
 def await_(f, n=45):
@@ -25,8 +39,10 @@ def await_(f, n=45):
     while time.monotonic()<end:
         try:
             a=f()
-            if a: return a
-        except (ConnectionError,urllib.error.URLError): pass
+            if a:
+                return a
+        except (ConnectionError,urllib.error.URLError):
+            pass
         time.sleep(.15)
     raise TimeoutError(f'Wait timed out: {f.__name__}')
 def login():
@@ -96,5 +112,8 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
         for p in (gate,platform,fixture):
             if p is not None and p.poll() is None:
                 p.terminate()
-                try: p.wait(10)
-                except subprocess.TimeoutExpired: p.kill(); p.wait()
+                try:
+                    p.wait(10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()

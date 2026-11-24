@@ -54,6 +54,24 @@ fn version_one_does_not_replay_old_admissions() {
 }
 
 #[test]
+fn upgrade_expires_unbound_approval_without_running_it_or_notifying() {
+    let mut db = empty();
+    enqueue(&mut db, "a", "a", "first", Some("general")).unwrap();
+    enqueue(&mut db, "a", "b", " /Approve session", None).unwrap();
+    enqueue(&mut db, "a", "c", "later", None).unwrap();
+    init(&mut db).unwrap();
+    assert_eq!(claim(&mut db).unwrap()["id"], "a");
+    assert!(claim(&mut db).unwrap().is_null());
+    assert_eq!(
+        history(&db, "a").unwrap()[1]["answer"],
+        "Expired approval reply. Not sent to Hermes."
+    );
+    assert_eq!(notifications(&db).unwrap(), json!([]));
+    finish(&mut db, "a", "a", "done").unwrap();
+    assert_eq!(claim(&mut db).unwrap()["id"], "c");
+}
+
+#[test]
 fn queued_work_is_fifo_per_thread_and_uncertain_claims_block_only_their_thread() {
     let mut db = empty();
     enqueue(&mut db, "a", "a", "one", Some("general")).unwrap();

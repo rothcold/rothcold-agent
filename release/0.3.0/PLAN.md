@@ -8,9 +8,9 @@
 
 | 项目 | 工作分支 | 状态 | 功能提交 / 合并提交 | 验收证据或待办 |
 | :--- | :------- | :--- | :------------------ | :------------- |
-| A1 Category 改名与归档 | `feature/030-archive-inbox` | 分支复测中 | `8477d20` / 未合并 | 矮屏回归，见交接记录 |
-| A2 Thread 归档 | `feature/030-archive-inbox` | 分支复测中 | `8477d20` / 未合并 | 矮屏回归，见交接记录 |
-| A3 Inbox 摘要 | `feature/030-archive-inbox` | 分支复测中 | `8477d20` / 未合并 | 与 A1、A2 同一分支 |
+| A1 Category 改名与归档 | `feature/030-archive-inbox` | 验收通过、已合并 | `8477d20`、`4fc388e` / `1f31b35` | `browser-archive.cjs` 检查改名保留链接和草稿、分类恢复不解开单独归档；桌面及手机 Archive 截图已审。 |
+| A2 Thread 归档 | `feature/030-archive-inbox` | 验收通过、已合并 | `4fc388e` / `1f31b35` | 390×360、125% 字号保持 74.77px 对话区（阈值 72px）；键盘归档与恢复后草稿不丢。集成树 30 项系统测试全部通过。 |
+| A3 Inbox 摘要 | `feature/030-archive-inbox` | 验收通过、已合并 | `8477d20` / `1f31b35` | 同 Thread 两条回复各自显示正确预览，中英文、组合 emoji、旧库和推送均有用例。隔离 Gateway 检查改标题后相同通知保留原预览和未读状态。 |
 | B 外观三态 | `feature/030-themes` | 验收通过、已合并 | `b23934d` / `01398a9` | 隔离 `SCREENSHOTS=1 script/test`（27 系统、19 Rust、6 web）和 `script/test-gateway` 通过。主 agent 审阅首屏、三态和对比度断言，实看 `.screenshots/theme-{light,dark}-settings-{1100,375}.png` 及审批、抽屉截图。 |
 | C 自动标题 | `feature/030-thread-titles` | 验收通过、已合并 | `e433243` / `659fb1b` | 主 agent 在 B+C 集成树复跑两个隔离套件：28 系统、21 Rust、6 web 通过。Gateway 验证首条中文生成「矮柜图书收纳」、不阻塞 FIFO、手工改名与关闭开关优先。已实看 `.screenshots/auto-title-{1100,375}.png`，标题刷新不改草稿或 URL。 |
 | D 命令与 Skills 提示 | `feature/030-slash-menu` | 分支复测中 | `80feee7` / 未合并 | 审批用例选中项不符，见交接记录 |
@@ -22,6 +22,8 @@
 - Pi 并行任务 `32bb8fde-61e5-4ef3-ad2e-b5b4c267faed`。续接时先检查该 workflow 及四个 child 的状态，再对照各分支的 `git log` 和工作区差异；不要重复派工。
 
 - A、D 的首轮任务超时，但代码均已提交。A 在 360px 高窗口的对话区仅余 66.8px；D 的补全断言预期 `/approve`，实际选中 `/approvals`。已交原开发者复测：A `44d45c8d-2e95-4e2f-8fd7-d4c8be0aea14`，D `38dc2de9-3888-4597-b2ec-d132f2dfd974`。结果未出前不得合并。
+
+- A 的矮屏回归由 `4fc388e` 修复。A+B+C 集成保留两步原子升级：v6 标题任务，v7 归档和预览；共享目录轮询不会用旧响应覆盖刚改的字段。隔离套件证据：`.tools/030-review/abc-{system,gateway}.log`。
 
 ## A：整理工作区与 Inbox
 

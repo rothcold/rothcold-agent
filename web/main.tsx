@@ -393,6 +393,18 @@ function ThreadTitle({
 					<WorkspaceIcon name="back" />
 				</a>
 				<span className="thread-kicker">Thread</span>
+				<form
+					className="thread-archive"
+					method="post"
+					onSubmit={submit(async () => {
+						await archive(!archived);
+						setDestination(null);
+					})}
+				>
+					<button className="quiet" type="submit" aria-disabled={busy}>
+						{archived ? "Restore thread" : "Archive thread"}
+					</button>
+				</form>
 			</div>
 			<h1 id="thread-heading" tabIndex={-1}>
 				{title}
@@ -434,17 +446,6 @@ function ThreadTitle({
 						Move thread
 					</button>
 				)}
-				<form
-					method="post"
-					onSubmit={submit(async () => {
-						await archive(!archived);
-						setDestination(null);
-					})}
-				>
-					<button className="quiet" type="submit" aria-disabled={busy}>
-						{archived ? "Restore thread" : "Archive thread"}
-					</button>
-				</form>
 				{markRead && (
 					<button className="quiet" type="button" onClick={markRead}>
 						Mark thread read

@@ -116,6 +116,7 @@ module.exports = async function workspaceArchive(page, origin, assertLayout) {
   await sameThread.first().click();
   await page.getByText('Restore the category and this thread to reply.', {exact:true}).waitFor();
   await page.getByRole('link', {name:'Back to Renamed fixtures'}).click();
+  await assertLayout(page, 320, 420, '.category-pane, .pane-scroll', '.category-menu summary');
   await categoryAction('Restore category');
   await page.locator('#first-message').waitFor();
   assert.equal(await page.locator('#first-message').innerText(), 'Draft survives category rename and archive');
@@ -126,6 +127,26 @@ module.exports = async function workspaceArchive(page, origin, assertLayout) {
   await page.getByRole('button', {name:'Restore thread', exact:true}).click();
   await reply.waitFor();
   assert.equal(await reply.innerText(), 'Draft survives thread archive');
+
+  await page.evaluate(() => { document.documentElement.style.fontSize = '125%'; });
+  const archiveControl = page.locator('.thread-archive button');
+  for (const [width,height] of [[390,360],[320,420]]) {
+    await assertLayout(page, width, height, '.pane-head, #turns, #compose', '.thread-archive button');
+    await page.waitForFunction(() => {
+      const button = document.querySelector('.thread-archive button').getBoundingClientRect();
+      const head = document.querySelector('.conversation .pane-head').getBoundingClientRect();
+      return button.top >= head.top && button.bottom <= head.bottom;
+    });
+    await shot('thread-archive-control-text125', width, height, '.pane-head, #turns, #compose');
+    await archiveControl.focus();
+    await page.keyboard.press('Enter');
+    await page.getByText('Restore this thread to reply.', {exact:true}).waitFor();
+    assert.equal(await reply.count(), 0);
+    assert(await archiveControl.evaluate(el => document.activeElement === el));
+    await page.keyboard.press('Enter');
+    await reply.waitFor();
+    assert.equal(await reply.innerText(), 'Draft survives thread archive');
+  }
   await page.reload();
   await reply.waitFor();
   assert.equal(new URL(page.url()).hash, parked);

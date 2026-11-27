@@ -724,7 +724,8 @@ summary {
 	flex-wrap: wrap;
 	margin: 2px 0 0 -8px;
 }
-.thread-tools button {
+.thread-tools button,
+.thread-archive button {
 	color: var(--muted);
 	font-size: var(--label);
 	padding-inline: 7px;
@@ -733,7 +734,8 @@ summary {
 	max-width: var(--readable);
 	padding-top: 8px;
 }
-.thread-tools form {
+.pane-head .thread-archive {
+	margin-inline-start: auto;
 	padding-top: 0;
 }
 #turns {

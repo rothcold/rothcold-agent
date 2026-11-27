@@ -18,6 +18,8 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.event import MessageEvent
 
+from .thread_titles import run_title_jobs
+
 ORIGIN = 'http://127.0.0.1:8766'
 BACKEND = 'hermes'
 AVATAR_LIMIT = 5 * 1024 * 1024
@@ -118,6 +120,7 @@ class RothcoldAgent(BasePlatformAdapter):
         super().__init__(config, Platform('rothcold_agent'))
         self.client = None
         self.worker = None
+        self.title_worker = None
         self._cards = {}
         self._avatar = None
 
@@ -127,10 +130,16 @@ class RothcoldAgent(BasePlatformAdapter):
         self.client = ClientSession(timeout=ClientTimeout(total=5), headers={
             'Origin': ORIGIN, 'Authorization': 'Bearer ' + get_scoped_secret('ROTHCOLD_AGENT_ADAPTER_TOKEN')})
         self.worker = asyncio.create_task(self.receive())
+        self.title_worker = asyncio.create_task(run_title_jobs(self.post))
         self._mark_connected()
         return True
 
     async def disconnect(self):
+        if self.title_worker:
+            self.title_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.title_worker
+            self.title_worker = None
         if self.worker:
             self.worker.cancel()
             with suppress(asyncio.CancelledError):

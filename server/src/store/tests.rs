@@ -8,7 +8,7 @@ fn empty() -> Result<Connection> {
 
 fn restore_v4_shape(db: &Connection) -> SqlResult<()> {
     db.execute_batch(
-        "DROP TABLE backend_profiles; DROP TABLE identities; DROP TABLE attachments;
+        "DROP TABLE thread_title_jobs; DROP TABLE backend_profiles; DROP TABLE identities; DROP TABLE attachments;
         ALTER TABLE placement DROP COLUMN original_channel; PRAGMA user_version=4;",
     )
 }
@@ -265,7 +265,7 @@ fn version_three_adds_device_sessions_without_touching_workspace() -> Result<()>
          INSERT INTO notifications VALUES ('turn',0);",
     )?;
     init(&mut db)?;
-    assert_eq!(count(&db, "PRAGMA user_version", [])?, 5);
+    assert_eq!(count(&db, "PRAGMA user_version", [])?, 6);
     assert_eq!(count(&db, "SELECT count(*) FROM device_sessions", [])?, 0);
     assert_eq!(
         count(
@@ -308,7 +308,7 @@ fn version_four_migrates_move_and_preserves_original_enqueue_receipt_and_notific
     restore_v4_shape(&db)?;
     init(&mut db)?;
     init(&mut db)?;
-    assert_eq!(count(&db, "PRAGMA user_version", [])?, 5);
+    assert_eq!(count(&db, "PRAGMA user_version", [])?, 6);
     assert!(matches!(
         move_thread(&db, "missing", &to),
         Err(Error::Missing)

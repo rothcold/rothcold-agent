@@ -7,6 +7,8 @@ py=$core/venv/bin/python
 tmp=$(mktemp -d "$root/.test-XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/home" "$tmp/tmp" "$tmp/profile"
+# This suite does not run a model server; the isolated Gateway suite tests the real title request.
+printf 'auxiliary:\n  title_generation:\n    enabled: false\n' > "$tmp/profile/config.yaml"
 script/pnpm format:check
 script/pnpm lint
 script/pnpm typecheck

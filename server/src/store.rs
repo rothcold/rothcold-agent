@@ -59,7 +59,7 @@ pub fn init(db: &mut Connection) -> Result<()> {
         0 | 1 => {
             tx.execute(INTERRUPT, [])?;
         }
-        2..=5 => (),
+        2..=6 => (),
         _ => return Err(Error::Conflict("Unsupported history database version")),
     }
     if version < 3 {
@@ -80,6 +80,10 @@ pub fn init(db: &mut Connection) -> Result<()> {
             ALTER TABLE placement ADD COLUMN original_channel TEXT REFERENCES channels(id);
             UPDATE placement SET original_channel=channel;
             PRAGMA user_version=5;")?;
+    }
+    if version < 6 {
+        super::thread_titles::migrate(&tx)?;
+        tx.pragma_update(None, "user_version", 6)?;
     }
     // Old clients queued slash replies without the prompt ID. Never deliver those after an upgrade.
     for row in rows(&tx, "SELECT id,text FROM turns WHERE state='queued'", [])? {
@@ -248,10 +252,13 @@ pub fn finish(db: &mut Connection, chat: &str, id: &str, text: &str) -> Result<(
 pub fn chats(db: &Connection) -> Result<Value> {
     Ok(rows(db,"SELECT id,title,channel FROM chats JOIN placement ON placement.chat=chats.id ORDER BY chats.rowid DESC",[])?.into())
 }
-pub fn rename(db: &Connection, chat: &str, title: &str) -> Result<()> {
-    if db.execute("UPDATE chats SET title=? WHERE id=?", [title, chat])? == 0 {
+pub fn rename(db: &mut Connection, chat: &str, title: &str) -> Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if tx.execute("UPDATE chats SET title=? WHERE id=?", [title, chat])? == 0 {
         return Err(Error::Missing);
     }
+    super::thread_titles::cancel(&tx, chat)?;
+    tx.commit()?;
     Ok(())
 }
 pub fn move_thread(db: &Connection, chat: &str, channel: &str) -> Result<()> {
@@ -420,6 +427,9 @@ pub fn enqueue(
             "INSERT INTO turns VALUES(?,?,?,'queued',NULL)",
             params![id, chat, text],
         )?;
+        if category.is_some() && !text.trim().is_empty() {
+            super::thread_titles::schedule(&tx, chat, id)?;
+        }
         for (position, attachment) in attachments.iter().enumerate() {
             if tx.execute(
                 "UPDATE attachments SET turn=?,position=? WHERE id=? AND purpose='turn' AND turn IS NULL",

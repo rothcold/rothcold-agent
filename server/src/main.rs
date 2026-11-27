@@ -3,6 +3,7 @@ mod attachments;
 mod profiles;
 mod sessions;
 mod store;
+mod thread_titles;
 
 use axum::{
     Extension, Json, Router,
@@ -295,7 +296,7 @@ async fn rename(
     if title.chars().any(char::is_control) {
         return Err(BAD);
     }
-    store::rename(&lock(&a.db), &chat, title)?;
+    store::rename(&mut lock(&a.db), &chat, title)?;
     Ok(Json(json!({"title": title})))
 }
 async fn move_thread(
@@ -516,6 +517,8 @@ async fn main() -> std::io::Result<()> {
         .route("/adapter/avatar", post(attachments::upload_backend))
         .route("/adapter/attachments/{id}", get(attachments::adapter_view))
         .route("/adapter/claim", post(claim))
+        .route("/adapter/title-claim", post(thread_titles::claim))
+        .route("/adapter/title-result", post(thread_titles::finish))
         .route("/adapter/admission", post(admission))
         .route("/adapter/update", post(update))
         .route("/adapter/push", post(push))

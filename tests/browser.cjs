@@ -813,6 +813,19 @@ async function profilesAttachmentsAndMoves(page, origin) {
       await page.locator('article').filter({hasText:'First offline message'}).getByText('Late original answer',{exact:true}).waitFor();
       assert.equal(await editorText(page.getByLabel('Your message')),'Unsent reply');
       assert.equal(page.url(),first);
+
+      const titleJob = await adapterPost('title-claim',{});
+      assert.equal(titleJob.text,'First offline message');
+      await adapterPost('title-result',{claim:titleJob.claim,title:'Offline Reply Recovery'});
+      await adapterPost('title-result',{claim:titleJob.claim,title:'Duplicate title ignored'});
+      for (const width of [1100,375]) {
+        await page.setViewportSize({width,height:800});
+        await page.getByRole('heading',{name:'Offline Reply Recovery',exact:true}).waitFor();
+        assert.equal(page.url(),first);
+        assert.equal(await editorText(page.getByLabel('Your message')),'Unsent reply');
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,`auto-title-${width}.png`)});
+      }
       await page.setViewportSize({width:1100,height:800});
 
       // This response commits the old first message but must leave a replacement draft alone.

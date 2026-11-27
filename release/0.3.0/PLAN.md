@@ -13,17 +13,25 @@
 | A3 Inbox 摘要 | `feature/030-archive-inbox` | 验收通过、已合并 | `8477d20` / `1f31b35` | 同 Thread 两条回复各自显示正确预览，中英文、组合 emoji、旧库和推送均有用例。隔离 Gateway 检查改标题后相同通知保留原预览和未读状态。 |
 | B 外观三态 | `feature/030-themes` | 验收通过、已合并 | `b23934d` / `01398a9` | 隔离 `SCREENSHOTS=1 script/test`（27 系统、19 Rust、6 web）和 `script/test-gateway` 通过。主 agent 审阅首屏、三态和对比度断言，实看 `.screenshots/theme-{light,dark}-settings-{1100,375}.png` 及审批、抽屉截图。 |
 | C 自动标题 | `feature/030-thread-titles` | 验收通过、已合并 | `e433243` / `659fb1b` | 主 agent 在 B+C 集成树复跑两个隔离套件：28 系统、21 Rust、6 web 通过。Gateway 验证首条中文生成「矮柜图书收纳」、不阻塞 FIFO、手工改名与关闭开关优先。已实看 `.screenshots/auto-title-{1100,375}.png`，标题刷新不改草稿或 URL。 |
-| D 命令与 Skills 提示 | `feature/030-slash-menu` | 分支复测中 | `80feee7` / 未合并 | 审批用例选中项不符，见交接记录 |
-| 集成回归 | `integration/0.3.0` | 待集成 | 待合并 | 见发布前检查 |
+| D 命令与 Skills 提示 | `feature/030-slash-menu` | 验收通过、已合并 | `80feee7`、`4fe0afb` / `f7c2a1e` | 精确匹配优先，选中不发送；隔离 Gateway 发现并调用 `/sethome` 和合成 skill。Chromium 覆盖键盘、触屏和 IME；主 agent 实看两种主题、两种宽度的候选菜单。 |
+| 集成回归 | `integration/0.3.0` | 功能验收通过，未发布 | 验收代码 `f7c2a1e` | 30 项系统、25 项 Rust、6 项 web 测试通过；真实 Gateway 隔离 smoke 通过，包括已校验的 6 个 wheel 文件。详见下方复验步骤与诊断范围。 |
 
 ## 交接记录
 
 - 四个 worktree 位于仓库同级的 `../rothcold-agent-v0.3.0/{archive-inbox,themes,thread-titles,slash-menu}`，共同起点是计划提交 `c2347cf`。`git worktree list` 可核对本地分支与目录。
 - Pi 并行任务 `32bb8fde-61e5-4ef3-ad2e-b5b4c267faed`。续接时先检查该 workflow 及四个 child 的状态，再对照各分支的 `git log` 和工作区差异；不要重复派工。
 
-- A、D 的首轮任务超时，但代码均已提交。A 在 360px 高窗口的对话区仅余 66.8px；D 的补全断言预期 `/approve`，实际选中 `/approvals`。已交原开发者复测：A `44d45c8d-2e95-4e2f-8fd7-d4c8be0aea14`，D `38dc2de9-3888-4597-b2ec-d132f2dfd974`。结果未出前不得合并。
+- A、D 的首轮任务超时，但代码均已提交。A 在 360px 高窗口的对话区仅余 66.8px；D 的补全断言预期 `/approve`，实际选中 `/approvals`。已交原开发者复测：A `44d45c8d-2e95-4e2f-8fd7-d4c8be0aea14`，D `38dc2de9-3888-4597-b2ec-d132f2dfd974`。两个修复均在复测通过后合并。
 
 - A 的矮屏回归由 `4fc388e` 修复。A+B+C 集成保留两步原子升级：v6 标题任务，v7 归档和预览；共享目录轮询不会用旧响应覆盖刚改的字段。隔离套件证据：`.tools/030-review/abc-{system,gateway}.log`。
+
+- D 的审批候选问题由 `4fe0afb` 修复。四个功能分支均已合并并保留，无待人工验收分支。未签发版本、未改 `main`、未部署。
+
+## 集成复验记录
+
+- 在 `f7c2a1e` 的代码树，用锁定的 Node、uv、Hermes 源码和隔离 venv 执行 `SCREENSHOTS=1 bwrap --unshare-net --bind / / --dev /dev --proc /proc script/test`，再执行 `script/test-gateway`。两者退出码均为 0，不需停止宿主服务。日志：`.tools/030-review/final-system.log`、`.tools/030-review/final-gateway.log`。日志和图片是本地生成物，不随仓库分发；命令可重建。
+- 集成截图：`.screenshots/theme-{light,dark}-slash-menu-{1100,375}.png`。实际查看并检查两种尺寸的分组、选中态与控件边缘；测试另检查首屏配色、实际对比度、未提交的草稿和 IME 输入。未在物理手机上操作，非 Chromium 引擎未测。
+- pi-lens 新进程对 38 个变更文件执行 `source=lsp, mode=full, serverScope=all`。报告 0 error、0 warning，7 条 TS 弃用提示和 1 条拼写信息；18 个文件的 LSP 未确认，2 个无扩展脚本和 Cargo.lock 没有 LSP，不视为已静态验证。报告 `.tools/030-review/lens.json`。独立运行的 TypeScript、Rust、格式与构建检查通过，Biome 有一条已存在的 CSS 选择器顺序警告。
 
 ## A：整理工作区与 Inbox
 
@@ -42,7 +50,7 @@
 
 - 创建和入队保持同一事务，仍立即返回现有临时标题。Hermes 可用后，只根据首条用户提示异步归纳同语言短标题，不生成额外对话轮次或通知，不阻塞首条消息及之后的 FIFO。
 - 先核对 README 锁定的 Hermes 源码与标题能力；语义标题不是另一种前缀截取。人工改名优先，过期或重复结果不得覆盖。仅附件保留文件名；失败保留临时标题；不回写旧 Thread。
-- 接口决策：锁定版 Hermes 的 `generate_title` 在配置了 `auxiliary.title_generation.language` 时会改用配置语言。工作区标题按首条提示词的语言生成，因此使用 Hermes 的 `call_llm(task='title_generation', …)`，沿用标题启用开关、模型升级开关及路由，不改 Hermes 全局配置。测试覆盖语言设置冲突和禁用时不调用模型。
+- 接口决策：锁定版 Hermes 的 `generate_title` 在配置了 `auxiliary.title_generation.language` 时会改用配置语言。工作区标题按首条提示词的语言生成，因此使用 Hermes 的 `async_call_llm(task='title_generation', …)`，沿用标题启用开关、模型升级开关及路由，不改 Hermes 全局配置。测试覆盖语言设置冲突和禁用时不调用模型。
 - 验收离线创建再连接、成功归纳、失败、仅附件、重复结果及人工改名竞态。用隔离 Gateway 和合成模型验证真实链路，不接触实际会话、凭据或模型服务。
 
 ## D：空输入框的 `/` 命令与 Skills 提示

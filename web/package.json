@@ -13,8 +13,8 @@
 		"start": "node server.mjs",
 		"build": "node script/check-esbuild.mjs && vite build",
 		"typecheck": "tsc --noEmit",
-		"lint": "biome lint *.ts *.tsx *.mjs app.css index.html package.json tsconfig.json script",
-		"format:check": "biome format *.ts *.tsx *.mjs app.css index.html package.json tsconfig.json script",
+		"lint": "biome lint *.ts *.tsx *.mjs app.css index.html package.json tsconfig.json public/theme.js script",
+		"format:check": "biome format *.ts *.tsx *.mjs app.css index.html package.json tsconfig.json public/theme.js script",
 		"test": "node --test ./*.test.mjs"
 	},
 	"dependencies": {

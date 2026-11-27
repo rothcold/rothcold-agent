@@ -1878,6 +1878,38 @@ type Device = {
 	expires_at: number;
 };
 type Devices = { current: string; devices: Device[] };
+function AppearanceSettings() {
+	const [theme, setTheme] = useState(
+		() => document.documentElement.dataset.theme ?? "system",
+	);
+	return (
+		<section className="settings-appearance" aria-labelledby="appearance">
+			<h2 id="appearance">Appearance</h2>
+			<label htmlFor="theme">Theme</label>
+			<select
+				id="theme"
+				value={theme}
+				onChange={(event) => {
+					const choice = event.currentTarget.value;
+					const { dataset } = document.documentElement;
+					if (choice === "system") delete dataset.theme;
+					else dataset.theme = choice;
+					setTheme(choice);
+					try {
+						localStorage.setItem("rothcold-theme", choice);
+					} catch {
+						// The choice still applies to this page when storage is unavailable.
+					}
+				}}
+			>
+				<option value="system">Follow system</option>
+				<option value="light">Light</option>
+				<option value="dark">Dark</option>
+			</select>
+		</section>
+	);
+}
+
 function DeviceSettings({
 	server,
 	report,
@@ -1939,6 +1971,7 @@ function DeviceSettings({
 						</form>
 					</div>
 				</div>
+				<AppearanceSettings />
 				{children}
 				<h2>Signed-in devices</h2>
 				{devices && (

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { readFile } = require('node:fs/promises');
 const { createInterface } = require('node:readline');
+const { checkAppearanceSettings, themeScreens } = require('./browser-theme.cjs');
 
 async function assertLayout(page, width, height, containers, targets = '') {
   await page.setViewportSize({width,height});
@@ -349,7 +350,7 @@ async function profilesAttachmentsAndMoves(page, origin) {
     const apiOrigin = 'http://127.0.0.1:8766';
     const outsideOrigins = []; const errors = [];
     async function open(url, width) {
-      const ctx = await browser.newContext({viewport:{width,height:800}, serviceWorkers:'block'});
+      const ctx = await browser.newContext({viewport:{width,height:800}, colorScheme:'dark', serviceWorkers:'block'});
       await ctx.route('**/*', route => {
         const target = new URL(route.request().url()).origin;
         if (target === origin) return route.continue();
@@ -427,6 +428,7 @@ async function profilesAttachmentsAndMoves(page, origin) {
         await page.getByRole('heading',{name:'Settings'}).waitFor();
       }
       await assertGlobalPane(page,'Settings');
+      await checkAppearanceSettings(page, origin);
       if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,'settings-1100.png')});
       await page.setViewportSize({width:375,height:800});
       await settings();
@@ -1248,6 +1250,11 @@ async function profilesAttachmentsAndMoves(page, origin) {
       await page.locator('.approval-actions').scrollIntoViewIfNeeded();
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,`approval-${width}.png`)});
+      await themeScreens(page, 'approval', [
+        ['.approval-prompt'], ['.approval-actions .danger-action'],
+        ['.approval-actions .danger-action','border-top-color','parent'],
+        ['#compose [role="textbox"]'], ['#compose','border-top-color','parent'],
+      ]);
     }
     const approvalEditor = page.getByRole('textbox', {name:'Your message'});
     await approvalEditor.pressSequentially('/approve session');
@@ -1314,11 +1321,20 @@ async function profilesAttachmentsAndMoves(page, origin) {
       await fresh.setViewportSize({width,height:800});
       assert(await fresh.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       if (process.env.SHOTS) await fresh.screenshot({path:path.join(process.env.SHOTS,`${width}.png`),fullPage:true});
+      await themeScreens(fresh, 'thread', [
+        ['.markdown h3'], ['.markdown p'], ['.markdown p code'],
+        ['.markdown pre code'], ['.markdown .code-lang'], ['.markdown th'], ['.markdown td'],
+        ['#compose .is-editor-empty','color','self','::before'], ['#compose .primary-action'],
+      ]);
     }
     await fresh.getByRole('button',{name:'Workspace',exact:true}).click();
-    await push('Delivery with drawer open.');
+    await push('Delivery with drawer open.\n\n[Reading notes](https://example.test/notes)');
     const inbox = fresh.getByRole('link',{name:'Notifications 1 unread'});
     await inbox.waitFor();
+    await themeScreens(fresh, 'drawer', [
+      ['.nav-drawer .workspace-brand'], ['.nav-drawer .nav-heading'], ['.nav-drawer .category-row[data-active="true"] a'],
+      ['.nav-drawer .rail-count'], ['.mobile-nav .badge'],
+    ]);
     await fresh.waitForFunction(() => window.sentAlerts.length === 1);
     assert.equal(await fresh.evaluate(() => window.sentAlerts[0].body),'You have a new message.');
     await inbox.click();
@@ -1329,12 +1345,15 @@ async function profilesAttachmentsAndMoves(page, origin) {
       assert(await fresh.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await assertGlobalPane(fresh,'Inbox');
       if (process.env.SHOTS) await fresh.screenshot({path:path.join(process.env.SHOTS,`inbox-${width}.png`),fullPage:true});
+      await themeScreens(fresh, 'inbox', [['.items a'], ['.items small[data-unread="true"]']]);
     }
+    const drawerRead = fresh.waitForResponse(r => r.url().includes('/read/') && r.status() === 200);
     await event.click();
     await fresh.getByRole('heading',{name:'Library reading list'}).waitFor();
     assert.equal(fresh.url(), url);
     await fresh.getByText('Delivery with drawer open.',{exact:true}).waitFor();
-    await fresh.waitForResponse(r => r.url().includes('/read/') && r.status() === 200);
+    await drawerRead;
+    await themeScreens(fresh, 'thread-link', [['.markdown a[href="https://example.test/notes"]']]);
     await push('Long delivery.\n\n'+'A paragraph of reading.\n\n'.repeat(65));
     await fresh.waitForResponse(r => r.url().includes('/read/') && r.status() === 200);
     await fresh.locator('#turns').evaluate(el => {el.scrollTop=0;});

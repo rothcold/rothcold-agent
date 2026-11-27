@@ -70,6 +70,12 @@ Each sign-in creates a new device session with a fixed 30-day lifetime. Logging 
 
 In **Settings → Profile**, set the display names and avatars shown on owner and agent messages. An empty name uses the workspace fallback. **Sync from backend** refreshes a selected live backend (or uses its last saved profile when offline) and applies its non-empty name and any avatar to the agent. Passive backend reports fill empty agent fields only; they do not replace custom values.
 
+### Browser appearance
+
+In **Settings → Appearance**, choose **Follow system** (default), **Light**, or **Dark**. Follow system changes as your system appearance changes; manual choices stay fixed. The choice is stored per browser profile and web origin, not per account or backend, and applies to connection and sign-in screens as well as the workspace. If browser storage is unavailable, a manual choice lasts until the page reloads. The web browser must support CSS `light-dark()`.
+
+To check appearance manually, choose Light with the system set to Dark, reload the workspace, then sign out and choose Change server. The workspace, sign-in and connection screens should start in Light without flashing a dark surface. Repeat with Dark and a light system, then select Follow system and change the system appearance while the workspace is open. Check Settings, an unread Inbox item, a thread with Markdown and its composer, and a pending approval at desktop and phone widths. The Chromium suite captures `theme-*.png` in `.screenshots/` when run with `SCREENSHOTS=1` and checks preference behavior and rendered contrast independently of the captures.
+
 ## Native sessions and LAN/VPN HTTPS
 
 For native clients, use JSON `POST /api/login` with `{"token":"<owner token>","name":"<optional device label>"}`. Take `session` from the response and keep it in OS-protected storage; the API returns it only when creating the session and stores only its hash. Send `Authorization: Bearer <session>` for `GET /api/me`, `GET /api/sessions`, `POST /api/logout`, or `POST /api/sessions/{id}/revoke` (send `{}` for logout/revoke). The list returns the current device ID plus device IDs, labels, creation and expiration times, never bearers. Times are Unix seconds. `401` means the credential is missing, expired or revoked. `GET /api/status` is public. Native clients must not send an `Origin` header or browser fetch metadata. There is no CORS; cross-origin browser calls cannot use this native API. Browsers use the web origin with a cookie, never a bearer in JavaScript.

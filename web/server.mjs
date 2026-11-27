@@ -114,6 +114,7 @@ for (const [path, file, type] of [
 	["/", "index.html", "text/html; charset=utf-8"],
 	["/app.js", "app.js", "text/javascript; charset=utf-8"],
 	["/app.css", "app.css", "text/css; charset=utf-8"],
+	["/theme.js", "theme.js", "text/javascript; charset=utf-8"],
 	["/brand/icon-dark.svg", "brand/icon-dark.svg", "image/svg+xml"],
 	["/brand/icon-light.svg", "brand/icon-light.svg", "image/svg+xml"],
 ]) {

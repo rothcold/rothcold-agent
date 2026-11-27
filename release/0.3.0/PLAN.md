@@ -8,13 +8,18 @@
 
 | 项目 | 工作分支 | 状态 | 功能提交 / 合并提交 | 验收证据或待办 |
 | :--- | :------- | :--- | :------------------ | :------------- |
-| A1 Category 改名与归档 | `feature/030-archive-inbox` | 已规划 | 待提交 | 见 A1 |
-| A2 Thread 归档 | `feature/030-archive-inbox` | 已规划 | 待提交 | 见 A2 |
-| A3 Inbox 摘要 | `feature/030-archive-inbox` | 已规划 | 待提交 | 见 A3 |
-| B 外观三态 | `feature/030-themes` | 已规划 | 待提交 | 见 B |
-| C 自动标题 | `feature/030-thread-titles` | 已规划 | 待提交 | 见 C |
-| D 命令与 Skills 提示 | `feature/030-slash-menu` | 已规划 | 待提交 | 见 D |
+| A1 Category 改名与归档 | `feature/030-archive-inbox` | 已派工 | 待提交 | 见 A1 |
+| A2 Thread 归档 | `feature/030-archive-inbox` | 已派工 | 待提交 | 见 A2 |
+| A3 Inbox 摘要 | `feature/030-archive-inbox` | 已派工 | 待提交 | 见 A3 |
+| B 外观三态 | `feature/030-themes` | 已派工 | 待提交 | 见 B |
+| C 自动标题 | `feature/030-thread-titles` | 已派工 | 待提交 | 见 C |
+| D 命令与 Skills 提示 | `feature/030-slash-menu` | 已派工 | 待提交 | 见 D |
 | 集成回归 | `integration/0.3.0` | 待集成 | 待合并 | 见发布前检查 |
+
+## 交接记录
+
+- 四个 worktree 位于仓库同级的 `../rothcold-agent-v0.3.0/{archive-inbox,themes,thread-titles,slash-menu}`，共同起点是计划提交 `c2347cf`。`git worktree list` 可核对本地分支与目录。
+- Pi 并行任务 `32bb8fde-61e5-4ef3-ad2e-b5b4c267faed`。续接时先检查该 workflow 及四个 child 的状态，再对照各分支的 `git log` 和工作区差异；不要重复派工。
 
 ## A：整理工作区与 Inbox
 

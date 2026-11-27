@@ -10,7 +10,7 @@ ANSWER = 'Local fixture reply.'
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
+    def log_message(self, format, *args):
         pass  # never log headers, URLs, or prompts
 
     def respond(self, data, mime='application/json'):
@@ -34,6 +34,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(413)
         request = json.loads(self.rfile.read(size))
         print('completion requested', flush=True)
+        if any('rothcold-attachment-fixture.txt' in str(message.get('content', ''))
+               for message in request.get('messages', []) if message.get('role') == 'user'):
+            print('attachment reached model fixture', flush=True)
         until = time.monotonic() + 60
         while not release.is_file():
             if time.monotonic() >= until:

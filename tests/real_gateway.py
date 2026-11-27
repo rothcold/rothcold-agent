@@ -25,13 +25,16 @@ env=dict(os.environ, ROTHCOLD_AGENT_ADAPTER_TOKEN=bridge, ROTHCOLD_AGENT_ALLOWED
 platform_env = {'PATH':'/usr/bin:/bin', 'HOME':str(home.parent/'home'),
                 'ROTHCOLD_DATA_DIR':str(home.parent/'data'), 'ROTHCOLD_AGENT_OWNER_TOKEN':owner,
                 'ROTHCOLD_AGENT_ADAPTER_TOKEN':bridge}
-def request(path, data=None, token=None):
-    headers = {'Origin': base}
+def request(path, data=None, token=None, *, filename=None):
+    headers = {}
     if token:
         headers['Authorization'] = 'Bearer '+token
-    if data is not None:
+    if filename is not None:
+        headers.update({'Content-Type': 'text/plain', 'X-Rothcold-Filename': filename})
+    elif data is not None:
         headers['Content-Type']='application/json'
-    req = urllib.request.Request(base+path, headers=headers, data=None if data is None else json.dumps(data).encode())  # noqa: S310 - fixed loopback HTTP origin
+        data = json.dumps(data).encode()
+    req = urllib.request.Request(base+path, headers=headers, data=data)  # noqa: S310 - fixed loopback HTTP origin
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=3) as res:
         return res.status,json.load(res)
 def await_(f, n=45):
@@ -55,9 +58,7 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
     gate=None
     try:
         token=await_(login)
-        for route, asset in [('/', 'index.html'), ('/app.js', 'app.js'), ('/app.css', 'app.css')]:
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(base+route, timeout=3) as res:
-                assert res.read() == (home.parent/'expected-static'/asset).read_bytes()
+        assert request('/api/status') == (200, {'service':'rothcold-agent', 'apiVersion':1})
         channel=request('/api/channels',{'name':'Work'},token)[1]['id']
         msg={'id':str(uuid.uuid4()),'text':'Please reply with a short greeting.'}
         status, thread=request('/api/chats',dict(msg,channel=channel),token)
@@ -71,7 +72,7 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
         platform.terminate()
         platform.wait(10)
         platform=start_platform()
-        token=await_(login)
+        await_(lambda: request('/api/me',None,token)[0] == 200)
         assert request(path,None,token)[1]==queued
         gate=subprocess.Popen([os.environ['CORE']+'/venv/bin/hermes','gateway','run'], env=env, stdout=g, stderr=g)
         await_(lambda:'completion requested' in (home/'fixture.log').read_text())
@@ -104,10 +105,28 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
         assert request(path,sethome,token)[0]==202
         await_(lambda: len(request(path,None,token)[1])==3 and request(path,None,token)[1][2]['state']=='answered')
         assert chat in (home/'config.yaml').read_text()
-        time.sleep(.5)
-        count=(home/'fixture.log').read_text().count('completion requested')
-        assert count == 2, count
-        print('Offline platform restart + real Gateway reconnect + /sethome: two separate FIFO turns, slash command handled, no duplicate runs.')
+        assert (home/'fixture.log').read_text().count('completion requested') == 2
+
+        filename = 'rothcold-attachment-fixture.txt'
+        content = b'Disposable Gateway attachment fixture.\n'
+        status, item = request('/api/attachments', content, token, filename=filename)
+        assert status == 201 and item['filename'] == filename and item['kind'] == 'file'
+        attachment_turn = {'id': str(uuid.uuid4()), 'text': '', 'attachments': [item['id']]}
+        assert request(path, attachment_turn, token)[0] == 202
+
+        def attachment_final():
+            turns = request(path, None, token)[1]
+            return next((turn for turn in turns if turn['id'] == attachment_turn['id']
+                         and turn['state'] == 'answered'), None)
+
+        final = await_(attachment_final)
+        assert final['answer'] == 'Local fixture reply.' and final['text'] == '' and final['attachments'] == [item]
+        assert request('/api/notifications', None, token)[1][0]['request'] == attachment_turn['id']
+        time.sleep(.5)  # Allow another poll; the already-final turn must not run again.
+        log = (home/'fixture.log').read_text()
+        assert log.count('completion requested') == 3, log
+        assert log.count('attachment reached model fixture') == 1, log
+        print('Offline restart + real Gateway: two FIFO text turns, /sethome without inference, and one attachment-only turn reached the model and completed.')
     finally:
         for p in (gate,platform,fixture):
             if p is not None and p.poll() is None:

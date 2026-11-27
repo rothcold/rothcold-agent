@@ -1,4 +1,7 @@
 mod approvals;
+mod attachments;
+mod profiles;
+mod sessions;
 mod store;
 
 use axum::{
@@ -15,23 +18,29 @@ use serde_json::{Value, json};
 use std::{
     env, fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::{Arc, Mutex, MutexGuard},
+    time::Instant,
 };
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 const HOST: &str = "127.0.0.1:8766";
 const ORIGIN: &str = "http://127.0.0.1:8766";
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct Platform {
     db: Mutex<Connection>,
     auth: Mutex<Auth>,
     approvals: Mutex<approvals::Mailbox>,
+    attachments: PathBuf,
+    attachment_slots: attachments::TransferSlots,
+    profiles: Mutex<profiles::ProfilePolls>,
     owner: String,
     bridge: String,
 }
 struct Auth {
-    session: Option<(String, Instant)>,
     window: Instant,
     failures: u8,
 }
@@ -57,6 +66,12 @@ impl From<store::Error> for Error {
     }
 }
 type Result<T> = std::result::Result<T, Error>;
+impl From<rusqlite::Error> for Error {
+    fn from(error: rusqlite::Error) -> Self {
+        store::Error::Sql(error).into()
+    }
+}
+const UNAUTHORIZED: Error = Error(S::UNAUTHORIZED, "Unauthorized");
 const BAD: Error = Error(S::BAD_REQUEST, "Bad Request");
 fn field<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str> {
     v[key]
@@ -64,8 +79,7 @@ fn field<'a>(v: &'a Value, key: &str, max: usize) -> Result<&'a str> {
         .filter(|s| !s.trim().is_empty() && s.chars().count() <= max)
         .ok_or(BAD)
 }
-fn message(v: &Value) -> Result<(&str, &str)> {
-    let id = field(v, "id", 36)?;
+fn request_id(id: &str) -> Result<()> {
     let uuid = Uuid::parse_str(id).map_err(|_| BAD)?;
     if uuid.get_version_num() != 4
         || uuid.get_variant() != uuid::Variant::RFC4122
@@ -73,7 +87,42 @@ fn message(v: &Value) -> Result<(&str, &str)> {
     {
         return Err(BAD);
     }
-    Ok((id, field(v, "text", 8000)?))
+    Ok(())
+}
+fn message(v: &Value) -> Result<(&str, &str, Vec<&str>)> {
+    let id = field(v, "id", 36)?;
+    request_id(id)?;
+    let attachments = match v.get("attachments") {
+        None => Vec::new(),
+        Some(items) => {
+            let items = items
+                .as_array()
+                .filter(|items| items.len() <= 8)
+                .ok_or(BAD)?;
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                let id = item.as_str().ok_or(BAD)?;
+                request_id(id)?;
+                if ids.contains(&id) {
+                    return Err(BAD);
+                }
+                ids.push(id);
+            }
+            ids
+        }
+    };
+    let text = match v.get("text") {
+        None if !attachments.is_empty() => "",
+        Some(text) => text
+            .as_str()
+            .filter(|s| s.chars().count() <= 8000)
+            .ok_or(BAD)?,
+        _ => return Err(BAD),
+    };
+    if attachments.is_empty() && text.trim().is_empty() {
+        return Err(BAD);
+    }
+    Ok((id, text, attachments))
 }
 fn only(headers: &HeaderMap, key: HeaderName, expected: &str) -> bool {
     let mut all = headers.get_all(key).iter();
@@ -110,107 +159,131 @@ async fn guard(State(app): State<App>, req: Request, next: Next) -> Response {
 async fn checked(app: App, mut req: Request, next: Next) -> Result<Response> {
     let h = req.headers();
     let path = req.uri().path();
+    let adapter = path.starts_with("/adapter/");
+    let api = path.starts_with("/api/");
     if !only(h, header::HOST, HOST)
+        || req.uri().scheme().is_some()
+        || req.uri().authority().is_some()
         || req.uri().query().is_some()
-        || ((req.method() != Method::GET || h.contains_key(header::ORIGIN))
-            && !only(h, header::ORIGIN, ORIGIN))
+        || ((api || adapter)
+            && path
+                .bytes()
+                .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, b'/' | b'-' | b'_')))
     {
         return Err(Error(S::FORBIDDEN, "Forbidden"));
     }
-    let bearer = h
-        .get(header::AUTHORIZATION)
+    let mut authorizations = h.get_all(header::AUTHORIZATION).iter();
+    let bearer = authorizations
+        .next()
         .and_then(|v| v.as_bytes().strip_prefix(b"Bearer "))
         .unwrap_or_default();
-    let valid = if path.starts_with("/adapter/") {
-        same(bearer, app.bridge.as_bytes())
-    } else if path.starts_with("/api/") && path != "/api/login" {
-        app.auth
-            .lock()
-            .unwrap()
-            .session
-            .as_ref()
-            .is_some_and(|(k, end)| Instant::now() < *end && same(k.as_bytes(), bearer))
-    } else {
-        true
-    };
-    if !valid {
-        return Err(Error(S::UNAUTHORIZED, "Unauthorized"));
+    if adapter {
+        if authorizations.next().is_some() || !same(bearer, app.bridge.as_bytes()) {
+            return Err(UNAUTHORIZED);
+        }
+        if !only(h, header::ORIGIN, ORIGIN) {
+            return Err(Error(S::FORBIDDEN, "Forbidden"));
+        }
+    } else if h.contains_key(header::ORIGIN) || h.contains_key("sec-fetch-site") {
+        return Err(Error(S::FORBIDDEN, "Forbidden"));
     }
-    if req.method() == Method::HEAD {
+    if !matches!(*req.method(), Method::GET | Method::POST) {
         return Err(Error(S::METHOD_NOT_ALLOWED, "Method Not Allowed"));
     }
+    // Preserve the bearer while reading a bounded request body. Check it immediately before dispatch.
+    let bearer = if api && !matches!(path, "/api/login" | "/api/status") {
+        if bearer.is_empty() || authorizations.next().is_some() {
+            return Err(UNAUTHORIZED);
+        }
+        Some(bearer.to_vec())
+    } else {
+        None
+    };
     if req.method() == Method::POST {
-        let mime = h
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .split(';')
+        let binary = matches!(path, "/api/attachments" | "/adapter/avatar");
+        let mut content_types = h.get_all(header::CONTENT_TYPE).iter();
+        let mime = content_types
             .next()
-            .unwrap_or("")
-            .trim();
-        if !mime.eq_ignore_ascii_case("application/json")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let limit = if binary {
+            if let Some(key) = &bearer {
+                sessions::authenticate(&lock(&app.db), key)?.ok_or(UNAUTHORIZED)?;
+            }
+            if attachments::purpose(h, adapter)? == "turn" {
+                attachments::FILE_LIMIT
+            } else {
+                attachments::AVATAR_LIMIT
+            }
+        } else if matches!(path, "/adapter/final" | "/adapter/update" | "/adapter/push") {
+            800 * 1024 - 1
+        } else {
+            64 * 1024 - 1
+        };
+        let mime = mime.split(';').next().unwrap_or("").trim();
+        if (if binary {
+            mime.is_empty()
+        } else {
+            !mime.eq_ignore_ascii_case("application/json")
+        }) || content_types.next().is_some()
             || h.contains_key(header::CONTENT_ENCODING)
         {
             return Err(Error(S::UNSUPPORTED_MEDIA_TYPE, "Unsupported Media Type"));
         }
-        let limit = if matches!(path, "/adapter/final" | "/adapter/update" | "/adapter/push") {
-            800 * 1024
+        let permit = if binary {
+            Some(app.attachment_slots.upload()?)
         } else {
-            64 * 1024
+            None
         };
         let (parts, body) = req.into_parts();
-        let bytes = to_bytes(body, limit - 1)
-            .await
-            .map_err(|_| Error(S::PAYLOAD_TOO_LARGE, "Request Entity Too Large"))?;
-        let data: Value = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
-        if !data.is_object() {
-            return Err(BAD);
+        let read = to_bytes(body, limit);
+        let bytes = if binary {
+            tokio::time::timeout(std::time::Duration::from_secs(15), read)
+                .await
+                .map_err(|_| Error(S::REQUEST_TIMEOUT, "Attachment upload timed out"))?
+        } else {
+            read.await
         }
+        .map_err(|_| Error(S::PAYLOAD_TOO_LARGE, "Request Entity Too Large"))?;
         req = Request::from_parts(parts, axum::body::Body::empty());
-        req.extensions_mut().insert(data);
+        if let Some(permit) = permit {
+            req.extensions_mut()
+                .insert(attachments::transfer_bytes(bytes, permit));
+        } else {
+            let data: Value = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
+            if !data.is_object() {
+                return Err(BAD);
+            }
+            req.extensions_mut().insert(data);
+        }
+    }
+    if let Some(bearer) = bearer {
+        let device = sessions::authenticate(&lock(&app.db), &bearer)?.ok_or(UNAUTHORIZED)?;
+        req.extensions_mut().insert(device);
     }
     Ok(next.run(req).await)
 }
-async fn login(State(app): State<App>, Extension(data): Input) -> Result<Json<Value>> {
-    let mut auth = app.auth.lock().unwrap();
-    let now = Instant::now();
-    if now >= auth.window {
-        auth.failures = 0;
-        auth.window = now + Duration::from_secs(60);
-    }
-    if auth.failures >= 8 {
-        return Err(Error(S::TOO_MANY_REQUESTS, "Too Many Requests"));
-    }
-    if !same(field(&data, "token", 512)?.as_bytes(), app.owner.as_bytes()) {
-        auth.failures += 1;
-        return Err(Error(S::UNAUTHORIZED, "Unauthorized"));
-    }
-    let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    auth.failures = 0;
-    auth.session = Some((key.clone(), now + Duration::from_secs(8 * 3600)));
-    Ok(Json(json!({"session":key})))
-}
 async fn channels(State(a): State<App>) -> Result<Json<Value>> {
-    Ok(Json(store::channels(&a.db.lock().unwrap())?))
+    Ok(Json(store::channels(&lock(&a.db))?))
 }
 async fn category(State(a): State<App>, Extension(v): Input) -> Result<(S, Json<Value>)> {
     Ok((
         S::CREATED,
         Json(store::category(
-            &mut a.db.lock().unwrap(),
+            &mut lock(&a.db),
             field(&v, "name", 80)?.trim(),
         )?),
     ))
 }
 async fn chats(State(a): State<App>) -> Result<Json<Value>> {
-    Ok(Json(store::chats(&a.db.lock().unwrap())?))
+    Ok(Json(store::chats(&lock(&a.db))?))
 }
 async fn notifications(State(a): State<App>) -> Result<Json<Value>> {
-    Ok(Json(store::notifications(&a.db.lock().unwrap())?))
+    Ok(Json(store::notifications(&lock(&a.db))?))
 }
 async fn history(State(a): State<App>, Path(chat): Path<String>) -> Result<Json<Value>> {
-    let mut rows = store::history(&a.db.lock().unwrap(), &chat)?;
-    a.approvals.lock().unwrap().annotate(&chat, &mut rows);
+    let mut rows = store::history(&lock(&a.db), &chat)?;
+    lock(&a.approvals).annotate(&chat, &mut rows);
     Ok(Json(rows))
 }
 async fn rename(
@@ -222,18 +295,41 @@ async fn rename(
     if title.chars().any(char::is_control) {
         return Err(BAD);
     }
-    store::rename(&a.db.lock().unwrap(), &chat, title)?;
+    store::rename(&lock(&a.db), &chat, title)?;
     Ok(Json(json!({"title": title})))
 }
+async fn move_thread(
+    State(a): State<App>,
+    Path(chat): Path<String>,
+    Extension(v): Input,
+) -> Result<Json<Value>> {
+    let channel = field(&v, "channel", 36)?;
+    store::move_thread(&lock(&a.db), &chat, channel)?;
+    Ok(Json(json!({"id":chat,"channel":channel})))
+}
 async fn read(State(a): State<App>, Path(chat): Path<String>) -> Result<Json<Value>> {
-    store::mark_read(&a.db.lock().unwrap(), &chat)?;
+    store::mark_read(&lock(&a.db), &chat)?;
+    Ok(Json(json!({})))
+}
+async fn read_reply(
+    State(a): State<App>,
+    Path((chat, id)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    store::mark_reply_read(&lock(&a.db), &chat, &id)?;
+    Ok(Json(json!({})))
+}
+async fn stop_waiting(
+    State(a): State<App>,
+    Path((chat, id)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    store::stop_waiting(&lock(&a.db), &chat, &id)?;
     Ok(Json(json!({})))
 }
 fn receipt((fresh, obj): (bool, Value)) -> (S, Json<Value>) {
     (if fresh { S::ACCEPTED } else { S::OK }, Json(obj))
 }
 async fn start(State(a): State<App>, Extension(v): Input) -> Result<(S, Json<Value>)> {
-    let (id, text) = message(&v)?;
+    let (id, text, attachments) = message(&v)?;
     if approvals::is_control(text) {
         return Err(Error(
             S::CONFLICT,
@@ -246,11 +342,12 @@ async fn start(State(a): State<App>, Extension(v): Input) -> Result<(S, Json<Val
         field(&v, "channel", 36)?
     };
     Ok(receipt(store::enqueue(
-        &mut a.db.lock().unwrap(),
+        &mut lock(&a.db),
         id,
         id,
         text,
         Some(cat),
+        &attachments,
     )?))
 }
 async fn send_turn(
@@ -258,36 +355,47 @@ async fn send_turn(
     Path(chat): Path<String>,
     Extension(v): Input,
 ) -> Result<(S, Json<Value>)> {
-    let (id, text) = message(&v)?;
+    let (id, text, attachments) = message(&v)?;
     if approvals::is_control(text) {
-        a.approvals
-            .lock()
-            .unwrap()
-            .answer(&chat, v["approval"].as_str().unwrap_or(""), text)?;
+        if !attachments.is_empty() {
+            return Err(BAD);
+        }
+        lock(&a.approvals).answer(&chat, v["approval"].as_str().unwrap_or(""), text)?;
         return Ok((S::ACCEPTED, Json(json!({"id":id,"decision":"submitted"}))));
     }
     Ok(receipt(store::enqueue(
-        &mut a.db.lock().unwrap(),
+        &mut lock(&a.db),
         &chat,
         id,
         text,
         None,
+        &attachments,
     )?))
 }
 async fn connect(State(a): State<App>) -> Result<Json<Value>> {
-    *a.approvals.lock().unwrap() = approvals::Mailbox::default();
-    store::interrupt(&a.db.lock().unwrap())?;
+    *lock(&a.approvals) = approvals::Mailbox::default();
+    store::interrupt(&lock(&a.db))?;
     Ok(Json(json!({})))
 }
 async fn claim(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> {
-    if let Some(control) = a.approvals.lock().unwrap().poll(&v)? {
+    let backend = if let Some(id) = v.get("backend") {
+        profiles::backend_id(id.as_str().ok_or(BAD)?)?
+    } else {
+        "hermes"
+    };
+    let control = lock(&a.approvals).poll(&v)?;
+    let refresh = lock(&a.profiles).claim(backend, control.is_none());
+    if let Some(control) = control {
         return Ok(Json(control));
     }
-    Ok(Json(store::claim(&mut a.db.lock().unwrap())?))
+    if let Some(id) = refresh {
+        return Ok(Json(json!({"sync_profile":true,"sync_id":id.to_string()})));
+    }
+    Ok(Json(store::claim(&mut lock(&a.db))?))
 }
 async fn admission(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> {
     store::admission(
-        &a.db.lock().unwrap(),
+        &lock(&a.db),
         field(&v, "id", 36)?,
         v["accepted"].as_bool().ok_or(BAD)?,
     )?;
@@ -303,7 +411,7 @@ async fn update(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>
         Some(_) => Some(field(&v, "turn", 36)?),
     };
     store::record_update(
-        &mut a.db.lock().unwrap(),
+        &mut lock(&a.db),
         field(&v, "chat", 36)?,
         turn,
         field(&v, "id", 64)?,
@@ -314,15 +422,9 @@ async fn update(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>
 }
 async fn push(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> {
     let id = field(&v, "id", 36)?;
-    let uuid = Uuid::parse_str(id).map_err(|_| BAD)?;
-    if uuid.get_version_num() != 4
-        || uuid.get_variant() != uuid::Variant::RFC4122
-        || uuid.to_string() != id
-    {
-        return Err(BAD);
-    }
+    request_id(id)?;
     store::push(
-        &mut a.db.lock().unwrap(),
+        &mut lock(&a.db),
         field(&v, "chat", 36)?,
         id,
         field(&v, "text", 65536)?,
@@ -331,7 +433,7 @@ async fn push(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> 
 }
 async fn finish(State(a): State<App>, Extension(v): Input) -> Result<Json<Value>> {
     store::finish(
-        &mut a.db.lock().unwrap(),
+        &mut lock(&a.db),
         field(&v, "chat", 36)?,
         field(&v, "id", 36)?,
         field(&v, "text", 65536)?,
@@ -351,9 +453,7 @@ fn secret(name: &str) -> std::io::Result<String> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     // Restrict new DB, journal and directory modes, even outside systemd.
-    unsafe {
-        libc::umask(0o077);
-    }
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
     let owner = secret("ROTHCOLD_AGENT_OWNER_TOKEN")?;
     let bridge = secret("ROTHCOLD_AGENT_ADAPTER_TOKEN")?;
     if owner == bridge {
@@ -372,53 +472,54 @@ async fn main() -> std::io::Result<()> {
     let mut db = Connection::open(dir.join("history.sqlite3")).map_err(std::io::Error::other)?;
     store::init(&mut db)
         .map_err(|e| std::io::Error::other(format!("Database setup failed: {e:?}")))?;
+    let attachments = dir.join("attachments");
+    attachments::init_dir(&attachments)?;
     let app = Arc::new(Platform {
+        attachments,
+        attachment_slots: Default::default(),
+        profiles: Mutex::default(),
         db: Mutex::new(db),
         approvals: Mutex::default(),
         auth: Mutex::new(Auth {
-            session: None,
             window: Instant::now(),
             failures: 0,
         }),
         owner,
         bridge,
     });
-    let mut routes = Router::new()
-        .route("/api/login", post(login))
+    let routes = Router::new()
+        .route("/api/status", get(sessions::status))
+        .route("/api/login", post(sessions::login))
+        .route("/api/me", get(sessions::me))
+        .route("/api/logout", post(sessions::logout))
+        .route("/api/sessions", get(sessions::list))
+        .route("/api/sessions/{id}/revoke", post(sessions::revoke))
+        .route("/api/profile", get(profiles::get).post(profiles::update))
+        .route("/api/profile/sync", post(profiles::sync))
+        .route("/api/attachments", post(attachments::upload))
+        .route("/api/attachments/{id}", get(attachments::view))
+        .route("/api/attachments/{id}/download", get(attachments::download))
         .route("/api/channels", get(channels).post(category))
         .route("/api/chats", get(chats).post(start))
         .route("/api/notifications", get(notifications))
         .route("/api/chats/{chat}/read", post(read))
+        .route("/api/chats/{chat}/read/{id}", post(read_reply))
         .route("/api/chats/{chat}/rename", post(rename))
+        .route("/api/chats/{chat}/move", post(move_thread))
         .route("/api/chats/{chat}/turns", get(history).post(send_turn))
+        .route(
+            "/api/chats/{chat}/turns/{id}/stop-waiting",
+            post(stop_waiting),
+        )
         .route("/adapter/connect", post(connect))
+        .route("/adapter/profile", post(profiles::report))
+        .route("/adapter/avatar", post(attachments::upload_backend))
+        .route("/adapter/attachments/{id}", get(attachments::adapter_view))
         .route("/adapter/claim", post(claim))
         .route("/adapter/admission", post(admission))
         .route("/adapter/update", post(update))
         .route("/adapter/push", post(push))
         .route("/adapter/final", post(finish));
-    for (url, mime, body) in [
-        (
-            "/",
-            "text/html",
-            include_bytes!("../static/index.html").as_slice(),
-        ),
-        (
-            "/app.js",
-            "text/javascript",
-            include_bytes!("../static/app.js").as_slice(),
-        ),
-        (
-            "/app.css",
-            "text/css",
-            include_bytes!("../static/app.css").as_slice(),
-        ),
-    ] {
-        routes = routes.route(
-            url,
-            get(move || async move { ([(header::CONTENT_TYPE, mime)], body) }),
-        );
-    }
     println!("Rothcold Agent listening on {ORIGIN}");
     axum::serve(
         listener,

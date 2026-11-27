@@ -1,5 +1,14 @@
 import { Fragment, type ReactNode } from "react";
-import { type Block, type Inline, parseBlocks } from "./markdown-parse";
+import {
+	type Block,
+	type Inline,
+	type ListItem,
+	parseBlocks,
+} from "./markdown-parse.ts";
+
+function unknownMarkdownNode(node: never): never {
+	throw new Error(`Unknown Markdown node: ${JSON.stringify(node)}`);
+}
 
 function renderInlines(nodes: Inline[], prefix: string): ReactNode {
 	const out: ReactNode[] = [];
@@ -39,6 +48,8 @@ function renderInlines(nodes: Inline[], prefix: string): ReactNode {
 			case "br":
 				out.push(<br key={key} />);
 				break;
+			default:
+				return unknownMarkdownNode(node);
 		}
 	}
 	return out;
@@ -64,106 +75,101 @@ function renderHeading(
 	}
 }
 
-function renderBlocks(blocks: Block[], prefix: string): ReactNode {
-	const out: ReactNode[] = [];
-	for (let idx = 0; idx < blocks.length; idx++) {
-		const block = blocks[idx];
-		const key = `${prefix}-${idx}`;
-		switch (block.type) {
-			case "heading":
-				out.push(
-					renderHeading(block.level, renderInlines(block.inlines, key), key),
-				);
-				break;
-			case "paragraph":
-				out.push(<p key={key}>{renderInlines(block.inlines, key)}</p>);
-				break;
-			case "code":
-				out.push(
-					<div key={key} className="code-block">
-						{block.lang && <div className="code-lang">{block.lang}</div>}
-						<pre>
-							<code>{block.text}</code>
-						</pre>
-					</div>,
-				);
-				break;
-			case "blockquote":
-				out.push(
-					<blockquote key={key}>{renderBlocks(block.blocks, key)}</blockquote>,
-				);
-				break;
-			case "list": {
-				const items: ReactNode[] = [];
-				for (let j = 0; j < block.items.length; j++) {
-					const item = block.items[j];
-					const itemKey = `${key}-i${j}`;
-					const singlePara =
-						item.children.length === 1 && item.children[0].type === "paragraph"
-							? renderInlines(item.children[0].inlines, itemKey)
-							: renderBlocks(item.children, itemKey);
-					items.push(
-						<li
-							key={itemKey}
-							className={item.checked === undefined ? undefined : "task-item"}
-						>
-							{item.checked !== undefined && (
-								<input
-									type="checkbox"
-									checked={item.checked}
-									readOnly
-									aria-label={item.checked ? "Completed" : "Pending"}
-								/>
-							)}
-							<span>{singlePara}</span>
-						</li>,
-					);
-				}
-				out.push(
-					block.ordered ? (
-						<ol key={key} start={block.start}>
-							{items}
-						</ol>
-					) : (
-						<ul key={key}>{items}</ul>
-					),
-				);
-				break;
-			}
-			case "table": {
-				const heads: ReactNode[] = [];
-				for (let c = 0; c < block.headers.length; c++) {
-					const ck = `${key}-h${c}`;
-					heads.push(<th key={ck}>{renderInlines(block.headers[c], ck)}</th>);
-				}
-				const bodyRows: ReactNode[] = [];
-				for (let r = 0; r < block.rows.length; r++) {
-					const row = block.rows[r];
-					const cells: ReactNode[] = [];
-					for (let c = 0; c < row.length; c++) {
-						const ck = `${key}-r${r}c${c}`;
-						cells.push(<td key={ck}>{renderInlines(row[c], ck)}</td>);
-					}
-					bodyRows.push(<tr key={`${key}-r${r}`}>{cells}</tr>);
-				}
-				out.push(
-					<div key={key} className="table-wrap">
-						<table>
-							<thead>
-								<tr>{heads}</tr>
-							</thead>
-							<tbody>{bodyRows}</tbody>
-						</table>
-					</div>,
-				);
-				break;
-			}
-			case "hr":
-				out.push(<hr key={key} />);
-				break;
-		}
+function renderListItem(item: ListItem, itemKey: string) {
+	const onlyChild = item.children.length === 1 ? item.children[0] : undefined;
+	const content =
+		onlyChild?.type === "paragraph"
+			? renderInlines(onlyChild.inlines, itemKey)
+			: renderBlocks(item.children, itemKey);
+	return (
+		<li
+			key={itemKey}
+			className={item.checked === undefined ? undefined : "task-item"}
+		>
+			{item.checked !== undefined && (
+				<input
+					type="checkbox"
+					checked={item.checked}
+					readOnly
+					aria-label={item.checked ? "Completed" : "Pending"}
+				/>
+			)}
+			<span>{content}</span>
+		</li>
+	);
+}
+
+function renderList(block: Extract<Block, { type: "list" }>, key: string) {
+	const items = block.items.map((item, index) =>
+		renderListItem(item, `${key}-i${index}`),
+	);
+	return block.ordered ? (
+		<ol key={key} start={block.start}>
+			{items}
+		</ol>
+	) : (
+		<ul key={key}>{items}</ul>
+	);
+}
+
+function renderTable(block: Extract<Block, { type: "table" }>, key: string) {
+	const heads = block.headers.map((cell, index) => {
+		const cellKey = `${key}-h${index}`;
+		return <th key={cellKey}>{renderInlines(cell, cellKey)}</th>;
+	});
+	const bodyRows: ReactNode[] = [];
+	for (const [rowIndex, row] of block.rows.entries()) {
+		const rowKey = `${key}-r${rowIndex}`;
+		const cells = row.map((cell, colIndex) => {
+			const cellKey = `${rowKey}c${colIndex}`;
+			return <td key={cellKey}>{renderInlines(cell, cellKey)}</td>;
+		});
+		bodyRows.push(<tr key={rowKey}>{cells}</tr>);
 	}
-	return out;
+	return (
+		<div key={key} className="table-wrap">
+			<table>
+				<thead>
+					<tr>{heads}</tr>
+				</thead>
+				<tbody>{bodyRows}</tbody>
+			</table>
+		</div>
+	);
+}
+
+function renderBlock(block: Block, key: string): ReactNode {
+	switch (block.type) {
+		case "heading":
+			return renderHeading(block.level, renderInlines(block.inlines, key), key);
+		case "paragraph":
+			return <p key={key}>{renderInlines(block.inlines, key)}</p>;
+		case "code":
+			return (
+				<div key={key} className="code-block">
+					{block.lang && <div className="code-lang">{block.lang}</div>}
+					<pre>
+						<code>{block.text}</code>
+					</pre>
+				</div>
+			);
+		case "blockquote":
+			return (
+				<blockquote key={key}>{renderBlocks(block.blocks, key)}</blockquote>
+			);
+		case "list":
+			return renderList(block, key);
+		case "table":
+			return renderTable(block, key);
+		case "hr":
+			return <hr key={key} />;
+		default:
+			return unknownMarkdownNode(block);
+	}
+}
+
+function renderBlocks(blocks: Block[], prefix: string): ReactNode {
+	return blocks.map((block, index) => renderBlock(block, `${prefix}-${index}`));
 }
 
 export function Markdown({ text }: { text: string }) {

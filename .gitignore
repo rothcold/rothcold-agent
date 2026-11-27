@@ -16,6 +16,8 @@
 /dist/
 /server/target/
 /server/static/
+/web/dist/
+/web/rothcold-web.json
 node_modules/
 .venv/
 __pycache__/
@@ -24,6 +26,7 @@ __pycache__/
 .pytest_cache/
 
 # Disposable gateway profiles, browser output and editor scratch files.
+/.pi/
 /.test-*/
 /.gateway-*/
 /.screenshots/

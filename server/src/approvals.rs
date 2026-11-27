@@ -64,12 +64,19 @@ impl Mailbox {
         self.cards.iter().find(|c| c.chat == chat && c.id == id)
     }
     pub fn annotate(&self, chat: &str, history: &mut Value) {
-        for t in history.as_array_mut().unwrap() {
-            if matches!(t["state"].as_str(), Some("reserved" | "accepted")) {
-                for u in t["updates"].as_array_mut().unwrap() {
-                    if let Some(c) = self.card(chat, u["id"].as_str().unwrap()) {
-                        u["choices"] = json!(c.choices);
-                    }
+        let Some(turns) = history.as_array_mut() else {
+            return;
+        };
+        for turn in turns {
+            if !matches!(turn["state"].as_str(), Some("reserved" | "accepted")) {
+                continue;
+            }
+            let Some(updates) = turn["updates"].as_array_mut() else {
+                continue;
+            };
+            for update in updates {
+                if let Some(card) = update["id"].as_str().and_then(|id| self.card(chat, id)) {
+                    update["choices"] = json!(card.choices);
                 }
             }
         }
@@ -104,26 +111,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decisions_cannot_cross_requests_or_survive_lost_contact() {
+    fn decisions_cannot_cross_requests_or_survive_lost_contact() -> Result<()> {
         let mut mailbox = Mailbox::default();
         let poll = |id| json!({"approvals":[{"id":id,"chat":"thread","choices":["once","deny"]}]});
-        mailbox.poll(&poll("first")).unwrap();
+        mailbox.poll(&poll("first"))?;
         assert!(
             mailbox
                 .answer("thread", "first", "/approve session")
                 .is_err()
         );
-        mailbox.answer("thread", "first", "/approve").unwrap();
-        assert!(mailbox.poll(&poll("second")).unwrap().is_none());
+        mailbox.answer("thread", "first", "/approve")?;
+        assert!(mailbox.poll(&poll("second"))?.is_none());
         assert!(mailbox.answer("thread", "first", "/approve").is_err());
-        mailbox.answer("thread", "second", "/deny").unwrap();
+        mailbox.answer("thread", "second", "/deny")?;
         mailbox.last_poll = Some(Instant::now() - Duration::from_secs(6));
-        assert!(mailbox.poll(&poll("second")).unwrap().is_none());
-        mailbox.answer("thread", "second", "/deny").unwrap();
+        assert!(mailbox.poll(&poll("second"))?.is_none());
+        mailbox.answer("thread", "second", "/deny")?;
         assert_eq!(
-            mailbox.poll(&poll("second")).unwrap().unwrap()["choice"],
+            mailbox.poll(&poll("second"))?.ok_or(crate::Error(
+                S::INTERNAL_SERVER_ERROR,
+                "pending decision was not delivered"
+            ))?["choice"],
             "deny"
         );
         assert!(mailbox.answer("thread", "second", "/deny").is_err());
+        Ok(())
     }
 }

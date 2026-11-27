@@ -24,4 +24,6 @@ test("resubmitting the same draft retains its UUID, changed input does not", () 
 test("keep polling until a reply is recorded", () => {
 	for (const state of ["queued", "reserved", "accepted", "unknown", "answered"])
 		assert.equal(pending([{ state }]), state !== "answered");
+	assert.equal(pending([{ state: "released" }]), false);
+	assert.equal(pending([{ state: "released" }, { state: "queued" }]), true);
 });

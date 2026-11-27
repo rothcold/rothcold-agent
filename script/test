@@ -11,9 +11,11 @@ script/pnpm format:check
 script/pnpm lint
 script/pnpm typecheck
 script/pnpm test
+script/pnpm build
 script/build
 (cd server && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked)
-node --check server/static/app.js
+node --check web/dist/app.js
+node --check web/server.mjs
 node --check tests/browser.cjs
 "$py" -I -S -X pycache_prefix="$tmp/bytecode" -m compileall -q -f -o 0 hermes-adapter/rothcold_agent tests script/stage-wheel.py
 "$py" -I -S -B script/stage-wheel.py dist/*.whl "$tmp/profile/plugins"

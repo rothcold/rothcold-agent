@@ -5,6 +5,17 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 node=$(command -v node)
 [ "$("$node" -v)" = v24.13.0 ] || { echo 'Node v24.13.0 required' >&2; exit 1; }
+if [ "${1:-}" = start ]; then
+  [ "$#" -eq 1 ] || { echo 'start takes no arguments' >&2; exit 1; }
+  cd "$root/web"
+  # Production start needs only Node and the explicit, non-secret web settings.
+  exec env -i PATH="$(dirname "$node"):/usr/bin:/bin" \
+    ${ROTHCOLD_API_URL+"ROTHCOLD_API_URL=$ROTHCOLD_API_URL"} \
+    ${ROTHCOLD_WEB_CONFIG+"ROTHCOLD_WEB_CONFIG=$ROTHCOLD_WEB_CONFIG"} \
+    ${ROTHCOLD_WEB_ORIGIN+"ROTHCOLD_WEB_ORIGIN=$ROTHCOLD_WEB_ORIGIN"} \
+    ${ROTHCOLD_WEB_PORT+"ROTHCOLD_WEB_PORT=$ROTHCOLD_WEB_PORT"} \
+    "$node" server.mjs
+fi
 tools=$root/.tools
 mkdir -p "$tools/home" "$tools/tmp"
 if [ ! -f "$tools/pnpm/bin/pnpm.cjs" ]; then

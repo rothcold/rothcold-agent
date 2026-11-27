@@ -6,20 +6,57 @@ export type InboxEvent = {
 	channel: string;
 	unread: 0 | 1;
 };
-export type Draft = { id: string; text: string; approval?: string };
+export type Attachment = {
+	id: string;
+	filename: string;
+	mime: string;
+	kind: "image" | "video" | "audio" | "file";
+	size: number;
+};
+export type Identity = { name: string; avatar: string | null };
+export type Profile = {
+	owner: Identity;
+	agent: Identity;
+	backends: (Identity & { id: string; kind: string; updated_at: number })[];
+};
+export type Draft = {
+	id: string;
+	text: string;
+	approval?: string;
+	attachments?: string[];
+};
 export type TurnUpdate = {
 	id: string;
 	kind: "progress" | "commentary";
 	choices?: ("once" | "session" | "deny")[];
 	text: string;
 };
-export type Turn = Draft & {
-	state: "queued" | "accepted" | "reserved" | "unknown" | "answered";
+export type Turn = Pick<Draft, "id" | "text"> & {
+	attachments?: Attachment[];
+	state:
+		| "queued"
+		| "accepted"
+		| "reserved"
+		| "unknown"
+		| "released"
+		| "answered";
 	answer: string | null;
 	updates: TurnUpdate[];
 };
-export function requestFor(text: string, previous: Draft | null): Draft {
-	return previous?.text === text ? previous : { id: crypto.randomUUID(), text };
+export function requestFor(
+	text: string,
+	previous: Draft | null,
+	attachments = previous?.attachments ?? [],
+): Draft {
+	if (
+		previous?.text === text &&
+		(previous.attachments?.length ?? 0) === attachments.length &&
+		attachments.every((id, index) => previous.attachments?.[index] === id)
+	)
+		return previous;
+	const draft: Draft = { id: crypto.randomUUID(), text };
+	if (attachments.length) draft.attachments = attachments;
+	return draft;
 }
 export function replyDraft(
 	text: string,
@@ -29,43 +66,82 @@ export function replyDraft(
 	const draft = requestFor(text, previous);
 	if (!text.trimStart().startsWith("/")) return draft;
 	// Pin the prompt when the slash draft starts, not when Send eventually runs.
-	const cards = turns.flatMap((t) =>
-		t.updates.filter((u) => u.choices?.length),
+	if (previous?.text.trimStart().startsWith("/"))
+		return { ...draft, approval: previous.approval };
+	const cards = turns.flatMap((turn) =>
+		turn.updates.filter((update) => update.choices?.length),
 	);
-	const approval = previous?.text.trimStart().startsWith("/")
-		? previous.approval
-		: cards.length === 1
-			? cards[0].id
-			: undefined;
-	return { ...draft, approval };
+	return { ...draft, approval: cards.length === 1 ? cards[0].id : undefined };
 }
 export function pending(turns: Turn[]): boolean {
-	return turns.some((t) => t.state !== "answered");
+	return turns.some((t) => t.state !== "answered" && t.state !== "released");
 }
+export class SessionExpired extends Error {}
+
+async function decodeResponse<T>(
+	res: Response,
+	sessionRequired: boolean,
+): Promise<T> {
+	if (res.ok) return res.json();
+	if (sessionRequired && res.status === 401)
+		throw new SessionExpired(
+			"This device session expired or was revoked. Sign in again.",
+		);
+	throw new Error(await res.text());
+}
+
+async function requestJson<T>(
+	url: string,
+	options: RequestInit,
+	sessionRequired = false,
+): Promise<T> {
+	const response = await fetch(url, { ...options, redirect: "error" });
+	return decodeResponse<T>(response, sessionRequired);
+}
+
 export async function api<T>(
 	path: string,
-	session?: string,
-	data?: object,
+	server: string,
+	data?: Record<string, unknown>,
 ): Promise<T> {
-	const headers: Record<string, string> = {};
-	if (session) headers.Authorization = `Bearer ${session}`;
-	if (data) headers["Content-Type"] = "application/json";
-	const res = await fetch(`/api/${path}`, {
-		method: data ? "POST" : "GET",
-		headers,
+	const headers = new Headers({ "X-Rothcold-Server": server });
+	if (data) headers.set("Content-Type", "application/json");
+	return requestJson<T>(
+		`/api/${path}`,
+		{
+			method: data ? "POST" : "GET",
+			headers,
+			credentials: "same-origin",
+			body: data && JSON.stringify(data),
+		},
+		path !== "login",
+	);
+}
+
+export function connection<T>(
+	path: "config" | "check",
+	server?: string,
+): Promise<T> {
+	return requestJson<T>(`/connection/${path}`, {
+		headers: server ? { "X-Rothcold-Server": server } : undefined,
 		credentials: "omit",
-		redirect: "error",
-		body: data && JSON.stringify(data),
 	});
-	if (!res.ok) {
-		if (res.status === 401) {
-			throw Error(
-				session
-					? "Session expired. Reload and sign in again."
-					: "Invalid owner token.",
-			);
-		}
-		throw Error(await res.text());
-	}
-	return res.json();
+}
+
+export async function upload(
+	file: File,
+	server: string,
+	purpose: "turn" | "avatar",
+): Promise<Attachment> {
+	return requestJson<Attachment>("/api/attachments", {
+		method: "POST",
+		headers: {
+			"X-Rothcold-Server": server,
+			"X-Rothcold-Filename": encodeURIComponent(file.name),
+			"X-Rothcold-Purpose": purpose,
+			"Content-Type": file.type || "application/octet-stream",
+		},
+		credentials: "same-origin",
+		body: file,
+	});
 }

@@ -1,13 +1,11 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-script/pnpm build
 crate=server
 cargo build --manifest-path "$crate/Cargo.toml" --target-dir "$crate/target" --locked --release
 mkdir -p dist
 rm -f dist/*.whl
 install -m755 "$crate/target/release/rothcold-agent" dist/rothcold-agent
-install -m644 "$crate/static/licenses.md" dist/web-licenses.md
 cmp LICENSE hermes-adapter/LICENSE
 install -m644 LICENSE dist/LICENSE
 script/uv lock --check --offline --no-build

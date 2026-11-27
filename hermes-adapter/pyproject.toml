@@ -1,6 +1,6 @@
 [project]
 name = "hermes-rothcold-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Private loopback messaging adapter for the Hermes gateway"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">环信 · 雾银舱盖</title>
+  <desc id="desc">银灰外环与苍灰内面直接相接，左上保留定位角。内面只嵌一块带折口的鸦青舱板和一段沉缃圆弧，没有描边。</desc>
+  <rect width="256" height="256" fill="#141B21"/>
+  <!-- Run the face under the frame so antialiasing cannot expose the canvas at their joint. -->
+  <circle id="face" cx="128" cy="128" r="64" fill="#889BA8"/>
+  <circle id="ring" cx="128" cy="128" r="76" fill="none" stroke="#B6B9B4" stroke-width="30"/>
+  <path id="locator" fill="#B6B9B4" d="M51.3 88.9 L39.5 46.2 Q38.6 43.1 41.5 42.5 L46.6 41.5 Q48.6 41.1 50.5 42.6 L76 63.2 L63.5 78.5 Z"/>
+  <g id="inlays" transform="translate(128 128) rotate(20)">
+    <path id="hatch" fill="#2C4052" d="M0 -45 V-5 L6 1 V42 H-10 L-12 51 A52.4 52.4 0 0 1 -52.4 0 H-45 A45 45 0 0 1 0 -45 Z"/>
+    <path id="inset" fill="#CEAF79" d="M39.84 -23 A46 46 0 0 1 23 39.84 L17.5 30.31 A35 35 0 0 0 30.31 -17.5 Z"/>
+  </g>
+</svg>

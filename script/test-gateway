@@ -13,7 +13,6 @@ mkdir -m 700 "$scratch/home" "$scratch/profile" "$scratch/run" "$scratch/tmp"
 script/build
 "$core/venv/bin/python" -B -I -S script/stage-wheel.py dist/*.whl "$scratch/profile/plugins"
 install -m755 dist/rothcold-agent "$scratch/rothcold-agent"
-cp -r server/static "$scratch/expected-static"
 cat > "$scratch/profile/config.yaml" <<'YAML'
 plugins:
   isolation: in_process

@@ -1,5 +1,4 @@
 -- Synthetic snapshot of the Python platform's persisted v2 schema.
-PRAGMA user_version=2;
 CREATE TABLE chats(id TEXT PRIMARY KEY, title TEXT NOT NULL);
 CREATE TABLE turns(id TEXT PRIMARY KEY, chat TEXT NOT NULL REFERENCES chats(id), text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT);
 CREATE INDEX turns_chat ON turns(chat);

@@ -22,7 +22,7 @@ impl From<rusqlite::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 // Only TEXT, INTEGER and NULL columns are exposed by the fixed read queries.
-fn rows(db: &Connection, sql: &str, args: impl Params) -> SqlResult<Vec<Value>> {
+pub(crate) fn rows(db: &Connection, sql: &str, args: impl Params) -> SqlResult<Vec<Value>> {
     use rusqlite::types::ValueRef;
     let mut stmt = db.prepare(sql)?;
     stmt.query_map(args, |r| {
@@ -59,7 +59,7 @@ pub fn init(db: &mut Connection) -> Result<()> {
         0 | 1 => {
             tx.execute(INTERRUPT, [])?;
         }
-        2 | 3 => (),
+        2..=5 => (),
         _ => return Err(Error::Conflict("Unsupported history database version")),
     }
     if version < 3 {
@@ -69,9 +69,22 @@ pub fn init(db: &mut Connection) -> Result<()> {
             PRAGMA user_version=3;",
         )?;
     }
+    if version < 4 {
+        super::sessions::migrate(&tx)?;
+    }
+    if version < 5 {
+        tx.execute_batch("CREATE TABLE attachments(id TEXT PRIMARY KEY,turn TEXT REFERENCES turns(id),purpose TEXT NOT NULL CHECK(purpose IN ('turn','avatar','backend_avatar')),filename TEXT NOT NULL,mime TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('image','video','audio','file')),size INTEGER NOT NULL,position INTEGER CHECK(position BETWEEN 0 AND 7));
+            CREATE INDEX attachments_turn ON attachments(turn,position);
+            CREATE TABLE identities(role TEXT PRIMARY KEY CHECK(role IN ('owner','agent')),name TEXT NOT NULL DEFAULT '',avatar TEXT REFERENCES attachments(id));
+            CREATE TABLE backend_profiles(backend TEXT PRIMARY KEY,kind TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',avatar TEXT REFERENCES attachments(id),updated_at INTEGER NOT NULL);
+            ALTER TABLE placement ADD COLUMN original_channel TEXT REFERENCES channels(id);
+            UPDATE placement SET original_channel=channel;
+            PRAGMA user_version=5;")?;
+    }
     // Old clients queued slash replies without the prompt ID. Never deliver those after an upgrade.
     for row in rows(&tx, "SELECT id,text FROM turns WHERE state='queued'", [])? {
-        if super::approvals::is_control(row["text"].as_str().unwrap()) {
+        if super::approvals::is_control(row["text"].as_str().ok_or(rusqlite::Error::InvalidQuery)?)
+        {
             tx.execute("UPDATE turns SET state='answered',answer='Expired approval reply. Not sent to Hermes.' WHERE id=?", [row["id"].as_str()])?;
         }
     }
@@ -82,10 +95,17 @@ pub fn interrupt(db: &Connection) -> Result<()> {
     db.execute(INTERRUPT, [])?;
     Ok(())
 }
+pub fn stop_waiting(db: &Connection, chat: &str, id: &str) -> Result<()> {
+    if db.execute("UPDATE turns SET state='released' WHERE chat=? AND id=? AND state IN ('unknown','released')", [chat,id])? == 0 {
+        return Err(Error::Conflict("This turn is not waiting for recovery. Refresh its status."));
+    }
+    Ok(())
+}
 pub fn claim(db: &mut Connection) -> Result<Value> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let turn=rows(&tx,"SELECT t.id,t.chat,t.text,chats.title FROM turns t JOIN chats ON chats.id=t.chat WHERE t.state='queued' AND NOT EXISTS (SELECT 1 FROM turns p WHERE p.chat=t.chat AND p.rowid<t.rowid AND p.state!='answered') ORDER BY t.rowid LIMIT 1",[])?.pop();
-    if let Some(row) = &turn {
+    let mut turn=rows(&tx,"SELECT t.id,t.chat,t.text,chats.title FROM turns t JOIN chats ON chats.id=t.chat WHERE t.state='queued' AND NOT EXISTS (SELECT 1 FROM turns p WHERE p.chat=t.chat AND p.rowid<t.rowid AND p.state NOT IN ('answered','released')) ORDER BY t.rowid LIMIT 1",[])?.pop();
+    if let Some(row) = &mut turn {
+        add_attachments(&tx, row)?;
         tx.execute(
             "UPDATE turns SET state='reserved' WHERE id=?",
             [row["id"].as_str()],
@@ -214,7 +234,7 @@ pub fn finish(db: &mut Connection, chat: &str, id: &str, text: &str) -> Result<(
     match answer {
         Some(None) => {
             tx.execute(
-                "UPDATE turns SET answer=?,state='answered' WHERE id=?",
+                "UPDATE turns SET answer=?,state=CASE WHEN state='released' THEN 'released' ELSE 'answered' END WHERE id=?",
                 [text, id],
             )?;
             tx.execute("INSERT INTO notifications(request) VALUES (?)", [id])?;
@@ -230,6 +250,12 @@ pub fn chats(db: &Connection) -> Result<Value> {
 }
 pub fn rename(db: &Connection, chat: &str, title: &str) -> Result<()> {
     if db.execute("UPDATE chats SET title=? WHERE id=?", [title, chat])? == 0 {
+        return Err(Error::Missing);
+    }
+    Ok(())
+}
+pub fn move_thread(db: &Connection, chat: &str, channel: &str) -> Result<()> {
+    if db.execute("UPDATE placement SET channel=? WHERE chat=? AND EXISTS (SELECT 1 FROM channels WHERE id=?)", [channel, chat, channel])? == 0 {
         return Err(Error::Missing);
     }
     Ok(())
@@ -286,6 +312,7 @@ pub fn history(db: &Connection, chat: &str) -> Result<Value> {
         [chat],
     )?;
     for turn in &mut turns {
+        add_attachments(db, turn)?;
         if let Some(obj) = turn.as_object_mut() {
             let tid = obj.get("id").and_then(Value::as_str).unwrap_or_default();
             let updates = grouped.remove(tid).unwrap_or_default();
@@ -293,6 +320,24 @@ pub fn history(db: &Connection, chat: &str) -> Result<Value> {
         }
     }
     Ok(turns.into())
+}
+fn turn_attachments(db: &Connection, id: &str) -> SqlResult<Vec<Value>> {
+    rows(
+        db,
+        "SELECT id,filename,mime,kind,size FROM attachments WHERE turn=? ORDER BY position",
+        [id],
+    )
+}
+fn add_attachments(db: &Connection, turn: &mut Value) -> Result<()> {
+    let attachments = turn_attachments(db, turn["id"].as_str().unwrap_or_default())?;
+    if !attachments.is_empty() {
+        turn["attachments"] = attachments.into();
+    }
+    Ok(())
+}
+pub fn mark_reply_read(db: &Connection, chat: &str, id: &str) -> Result<()> {
+    db.execute("UPDATE notifications SET unread=0 WHERE unread=1 AND request=? AND EXISTS (SELECT 1 FROM turns WHERE id=request AND chat=?)", [id,chat])?;
+    Ok(())
 }
 pub fn mark_read(db: &Connection, chat: &str) -> Result<()> {
     title(db, chat)?;
@@ -310,15 +355,25 @@ pub fn enqueue(
     id: &str,
     text: &str,
     category: Option<&str>,
+    attachments: &[&str],
 ) -> Result<(bool, Value)> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if category.is_none() {
         title(&tx, chat)?;
     }
-    let old=tx.query_row("SELECT turns.chat,text,channel FROM turns JOIN placement ON placement.chat=turns.chat WHERE id=?",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
+    let old=tx.query_row("SELECT turns.chat,text,original_channel FROM turns JOIN placement ON placement.chat=turns.chat WHERE id=?",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).optional()?;
     let fresh = old.is_none();
     if let Some((old_chat, old_text, old_cat)) = old {
-        if old_chat != chat || old_text != text || category.is_some_and(|c| c != old_cat) {
+        let linked = turn_attachments(&tx, id)?;
+        if old_chat != chat
+            || old_text != text
+            || category.is_some_and(|c| Some(c) != old_cat.as_deref())
+            || linked.len() != attachments.len()
+            || linked
+                .iter()
+                .zip(attachments)
+                .any(|(a, id)| a["id"].as_str() != Some(*id))
+        {
             return Err(Error::Conflict(
                 "Request ID already used for different input",
             ));
@@ -334,7 +389,19 @@ pub fn enqueue(
             if count(&tx, "SELECT count(*) FROM channels WHERE id=?", [cat])? == 0 {
                 return Err(Error::Missing);
             }
-            let label: String = text
+            let first_filename = if text.trim().is_empty() {
+                tx.query_row("SELECT filename FROM attachments WHERE id=? AND purpose='turn' AND turn IS NULL",
+                    [attachments.first().ok_or(Error::Conflict("Expected a message or attachment"))?], |r| r.get::<_, String>(0))
+                    .optional()?.ok_or(Error::Conflict("Attachment is not available for this turn"))?
+            } else {
+                String::new()
+            };
+            let source = if first_filename.is_empty() {
+                text
+            } else {
+                &first_filename
+            };
+            let label: String = source
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -342,7 +409,10 @@ pub fn enqueue(
                 .take(80)
                 .collect();
             tx.execute("INSERT INTO chats VALUES(?,?)", [chat, label.trim_end()])?;
-            tx.execute("INSERT INTO placement VALUES(?,?)", [chat, cat])?;
+            tx.execute(
+                "INSERT INTO placement(chat,channel,original_channel) VALUES(?,?,?)",
+                [chat, cat, cat],
+            )?;
         } else if count(&tx, "SELECT count(*) FROM turns WHERE chat=?", [chat])? >= 128 {
             return Err(Error::Conflict("Chat is full. Start a new chat."));
         }
@@ -350,9 +420,24 @@ pub fn enqueue(
             "INSERT INTO turns VALUES(?,?,?,'queued',NULL)",
             params![id, chat, text],
         )?;
+        for (position, attachment) in attachments.iter().enumerate() {
+            if tx.execute(
+                "UPDATE attachments SET turn=?,position=? WHERE id=? AND purpose='turn' AND turn IS NULL",
+                params![id, position, attachment],
+            )? != 1
+            {
+                return Err(Error::Conflict("Attachment is not available for this turn"));
+            }
+        }
     }
     let receipt = match category {
-        Some(cat) => json!({"id":chat,"title":title(&tx,chat)?,"channel":cat}),
+        Some(_) => {
+            let channel: String =
+                tx.query_row("SELECT channel FROM placement WHERE chat=?", [chat], |r| {
+                    r.get(0)
+                })?;
+            json!({"id":chat,"title":title(&tx,chat)?,"channel":channel})
+        }
         None => json!({"id":id}),
     };
     tx.commit()?;

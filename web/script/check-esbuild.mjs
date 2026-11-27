@@ -16,4 +16,4 @@ assert.equal(
 	execFileSync(binary, ["--version"], { encoding: "utf8" }).trim(),
 	pkg.version,
 );
-console.log(`Verified Vite's ${platform} ${pkg.version}`);
+process.stdout.write(`Verified Vite's ${platform} ${pkg.version}\n`);

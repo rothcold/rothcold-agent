@@ -54,3 +54,71 @@ test("keeps raw angle brackets literal and blocks unsafe link schemes", () => {
 		},
 	]);
 });
+
+test("continues past nested list lines and matching code fences", () => {
+	const blocks = parseBlocks(
+		[
+			"3. first",
+			"   - [x] nested",
+			"4. second",
+			"",
+			"> quoted",
+			"> next line",
+			"",
+			"~~~~ ts",
+			"~~~",
+			"~~~~",
+			"after",
+		].join("\n"),
+	);
+	assert.deepEqual(blocks, [
+		{
+			type: "list",
+			ordered: true,
+			start: 3,
+			items: [
+				{
+					children: [
+						{ type: "paragraph", inlines: [{ type: "text", text: "first" }] },
+						{
+							type: "list",
+							ordered: false,
+							start: 1,
+							items: [
+								{
+									checked: true,
+									children: [
+										{
+											type: "paragraph",
+											inlines: [{ type: "text", text: "nested" }],
+										},
+									],
+								},
+							],
+						},
+					],
+				},
+				{
+					children: [
+						{ type: "paragraph", inlines: [{ type: "text", text: "second" }] },
+					],
+				},
+			],
+		},
+		{
+			type: "blockquote",
+			blocks: [
+				{
+					type: "paragraph",
+					inlines: [
+						{ type: "text", text: "quoted" },
+						{ type: "br" },
+						{ type: "text", text: "next line" },
+					],
+				},
+			],
+		},
+		{ type: "code", lang: "ts", text: "~~~" },
+		{ type: "paragraph", inlines: [{ type: "text", text: "after" }] },
+	]);
+});

@@ -1,16 +1,72 @@
 import asyncio
+import hashlib
 import logging
 from contextlib import suppress
+from urllib.parse import quote
 from uuid import uuid4
 
 from aiohttp import ClientError, ClientResponseError, ClientSession, ClientTimeout
 from gateway.config import Platform
 from gateway.platforms._shared import get_scoped_secret, seed_extra_from_env
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    SendResult,
+    cache_audio_from_bytes_async,
+    cache_document_from_bytes_async,
+    cache_image_from_bytes_async,
+    cache_video_from_bytes_async,
+)
 from gateway.platforms.event import MessageEvent
 
 ORIGIN = 'http://127.0.0.1:8766'
+BACKEND = 'hermes'
+AVATAR_LIMIT = 5 * 1024 * 1024
+MEDIA_CACHE = {
+    'image': cache_image_from_bytes_async,
+    'video': cache_video_from_bytes_async,
+    'audio': cache_audio_from_bytes_async,
+}
+MEDIA_EXT = {
+    'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
+    'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm', 'video/ogg': '.ogv',
+    'audio/mpeg': '.mp3', 'audio/wav': '.wav', 'audio/ogg': '.ogg', 'audio/flac': '.flac',
+    'audio/mp4': '.m4a', 'audio/aac': '.aac', 'audio/webm': '.webm',
+}
 log = logging.getLogger(__name__)
+
+
+
+def _profile_snapshot():
+    from hermes_cli.profiles import read_profile_meta
+    from hermes_constants import get_hermes_home, profile_name_for_home
+
+    home = get_hermes_home()
+    meta = read_profile_meta(home)
+    profile = profile_name_for_home(home)
+    name = meta['display_name'] or meta['bot_title'] or (profile if profile != 'default' else None) or 'Hermes'
+    name = ''.join(c for c in name if not (ord(c) < 32 or 127 <= ord(c) <= 159)).strip()[:80] or 'Hermes'
+    for ext, mime in [('png', 'image/png'), ('jpg', 'image/jpeg'), ('webp', 'image/webp')]:
+        path = home / 'assets' / f'avatar.{ext}'
+        try:
+            if path.is_file() and path.stat().st_size <= AVATAR_LIMIT:
+                with path.open('rb') as file:
+                    data = file.read(AVATAR_LIMIT + 1)
+                if 0 < len(data) <= AVATAR_LIMIT:
+                    return name, (path.name, mime, data)
+        except OSError:
+            log.warning('Could not read Hermes profile avatar')
+    return name, None
+
+
+def _document_cache_name(filename):
+    # Hermes prepends a cache key; leave space within the filesystem component limit.
+    if len(filename.encode()) <= 220:
+        return filename
+    stem, dot, suffix = filename.rpartition('.')
+    if not stem or len(suffix.encode()) > 20:
+        return filename.encode()[:220].decode(errors='ignore')
+    ext = dot + suffix
+    return stem.encode()[:220 - len(ext.encode())].decode(errors='ignore') + ext
 
 
 def ready():
@@ -63,6 +119,7 @@ class RothcoldAgent(BasePlatformAdapter):
         self.client = None
         self.worker = None
         self._cards = {}
+        self._avatar = None
 
     async def connect(self, *, is_reconnect=False):
         if not ready():
@@ -93,6 +150,75 @@ class RothcoldAgent(BasePlatformAdapter):
             response.raise_for_status()
             return await response.json()
 
+    async def _profile_avatar(self, image):
+        filename, mime, data = image
+        key = hashlib.sha256(data).digest()
+        if self._avatar is not None and self._avatar[0] == key:
+            return self._avatar[1]
+        client = self.client
+        if client is None:
+            raise ClientError('Adapter disconnected')
+        async with client.post(ORIGIN + '/adapter/avatar', data=data, headers={
+            'X-Rothcold-Filename': quote(filename), 'Content-Type': mime,
+        }, allow_redirects=False) as response:
+            if response.status == 400:
+                log.warning('Rothcold rejected Hermes profile avatar')
+                return None
+            response.raise_for_status()
+            item = await response.json()
+        self._avatar = (key, item['id'])
+        return item['id']
+
+    async def _publish_profile(self, sync_id=None):
+        try:
+            async with asyncio.timeout(2):
+                name, image = await asyncio.to_thread(_profile_snapshot)
+                avatar = await self._profile_avatar(image) if image is not None else None
+                payload = {'backend': BACKEND, 'kind': BACKEND, 'name': name, 'avatar': avatar}
+                if sync_id is not None:
+                    payload['sync_id'] = sync_id
+                try:
+                    await self.post('profile', payload)
+                except ClientResponseError as exc:
+                    if exc.status != 400 or avatar is None:
+                        raise
+                    # The same API can reconnect with a different data directory.
+                    self._avatar = None
+                    payload['avatar'] = await self._profile_avatar(image)
+                    await self.post('profile', payload)
+        except (ClientError, OSError, TimeoutError):
+            log.warning('Rothcold did not confirm Hermes profile sync')
+
+    async def _download_attachment(self, attachment_id):
+        client = self.client
+        if client is None:
+            raise ClientError('Adapter disconnected')
+        url = ORIGIN + '/adapter/attachments/' + attachment_id
+        # Retry busy download slots only during staging, before handing the event to Hermes.
+        delays = iter((0.1, 0.2, 0.4, 0.8, 0.8))
+        while True:
+            async with client.get(url, allow_redirects=False) as response:
+                delay = next(delays, None) if response.status == 503 else None
+                if delay is None:
+                    response.raise_for_status()
+                    return await response.read()
+            await asyncio.sleep(delay)
+
+    async def _stage_media(self, attachments, event):
+        for item in attachments:
+            data = await self._download_attachment(item['id'])
+            if len(data) != item['size']:
+                raise ValueError('Incorrect Rothcold attachment size')
+            mime, filename = item['mime'], item['filename']
+            cache = MEDIA_CACHE.get(item['kind'])
+            if cache is None:
+                path = await cache_document_from_bytes_async(data, _document_cache_name(filename))
+            else:
+                path = await cache(data, MEDIA_EXT[mime])
+            event.media_urls.append(path)
+            event.media_types.append(mime)
+            event.media_filenames.append(filename)
+
     async def receive(self):
         new_connection = True
         async with asyncio.TaskGroup() as tasks:
@@ -101,8 +227,14 @@ class RothcoldAgent(BasePlatformAdapter):
                     if new_connection:
                         await self.post('connect', {})
                         new_connection = False
+                        await self._publish_profile()
                     cards = self._live_cards()
-                    row = await self.post('claim', {'approvals': cards} if cards else {})
+                    row = await self.post('claim', {'backend': BACKEND, **({'approvals': cards} if cards else {})})
+                    if row and row.get('sync_profile') is True:
+                        sync_id = row.get('sync_id')
+                        if isinstance(sync_id, str):
+                            await self._publish_profile(sync_id)
+                        continue
                     if row and 'approval' in row:
                         await self._answer_card(row)
                         continue
@@ -120,7 +252,7 @@ class RothcoldAgent(BasePlatformAdapter):
         chat, rid = row['chat'], row['id']
         accepted = False
         try:
-            accepted = await self.dispatch(chat, rid, row['text'], row['title'])
+            accepted = await self.dispatch(chat, rid, row['text'], row['title'], row.get('attachments', ()))
         except Exception:
             log.exception('Hermes admission did not complete')
         try:
@@ -128,7 +260,7 @@ class RothcoldAgent(BasePlatformAdapter):
         except (ClientError, TimeoutError):
             log.warning('Admission not confirmed to platform; request will not be replayed')
 
-    async def dispatch(self, chat, rid, text, title):
+    async def dispatch(self, chat, rid, text, title, attachments=()):
         source = self.build_source(chat, chat_name=title, user_id='owner',
                                    user_name='Owner', message_id=rid)
         event = MessageEvent(text=text, source=source, message_id=rid, user_id='owner',
@@ -137,6 +269,7 @@ class RothcoldAgent(BasePlatformAdapter):
             # Legacy or noncanonical slash input must never resolve today's prompt.
             await self.post('final', {'chat': chat, 'id': rid, 'text': 'Expired approval reply. Not sent to Hermes.'})
             return True
+        await self._stage_media(attachments, event)
         # The previous final can commit just before its Hermes session guard releases.
         previous = self._session_tasks.get(self._event_session_key(event))
         if previous is not None:

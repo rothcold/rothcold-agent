@@ -1351,8 +1351,17 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get(url+'?token=x',headers=self.auth)).status,403)
         self.assertEqual((await self.client.post(url,data='x',headers=self.auth)).status,415)
         self.assertEqual((await self.post('/api/chats',{'title':'x'*70000})).status,413)
-        for route in ('claim', 'connect', 'update', 'push', 'final', 'admission'):
+        for route in ('claim', 'connect', 'update', 'push', 'final', 'admission', 'slash-catalog'):
             self.assertEqual((await self.post('/adapter/'+route, {})).status,401)
+        catalog_path = ORIGIN + '/api/slash-catalog'
+        report_path = ORIGIN + '/adapter/slash-catalog'
+        self.assertEqual((await self.client.get(catalog_path, headers=self.bridge_bearer)).status, 401)
+        report = {'catalog': {'commands': ['status'], 'skills': ['synthetic-skill']}}
+        self.assertEqual((await self.client.post(report_path, headers=self.bridge_bearer, json=report)).status, 403)
+        self.assertEqual((await self.client.post(report_path, headers=self.bridge, json=report)).status, 200)
+        catalog = await self.client.get(catalog_path, headers=self.auth)
+        self.assertEqual(await catalog.json(), report)
+        self.assertEqual(catalog.headers['Cache-Control'], 'no-store')
         r = await self.client.get(ORIGIN)
         self.assertEqual(r.status, 404)
         self.assertEqual((await self.client.get(ORIGIN+'/app.js')).status, 404)

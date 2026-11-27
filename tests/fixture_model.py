@@ -47,6 +47,10 @@ class Handler(BaseHTTPRequestHandler):
         if any('rothcold-attachment-fixture.txt' in str(message.get('content', ''))
                for message in request.get('messages', []) if message.get('role') == 'user'):
             print('attachment reached model fixture', flush=True)
+        if any('SYNTHETIC_SLASH_SKILL_BODY' in str(message.get('content', ''))
+               and 'explicit skill invocation' in str(message.get('content', ''))
+               for message in request.get('messages', []) if message.get('role') == 'user'):
+            print('slash skill reached model fixture', flush=True)
         until = time.monotonic() + 60
         while not release.is_file():
             if time.monotonic() >= until:

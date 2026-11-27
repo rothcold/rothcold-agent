@@ -18,6 +18,7 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.event import MessageEvent
 
+from .slash_catalog import gateway_slash_catalog
 from .thread_titles import run_title_jobs
 
 ORIGIN = 'http://127.0.0.1:8766'
@@ -228,14 +229,31 @@ class RothcoldAgent(BasePlatformAdapter):
             event.media_types.append(mime)
             event.media_filenames.append(filename)
 
+    async def _publish_slash_catalog(self):
+        while True:
+            try:
+                catalog = await asyncio.to_thread(gateway_slash_catalog, self.platform.value,
+                                                  self.config.extra, 'owner')
+            except Exception:
+                log.debug('Gateway slash directory unavailable')
+                catalog = None
+            try:
+                await self.post('slash-catalog', {'catalog': catalog})
+            except (ClientError, TimeoutError):
+                # An older API may lack this optional endpoint. Keep delivery independent.
+                log.debug('Slash directory not published')
+            await asyncio.sleep(10)
+
     async def receive(self):
         new_connection = True
+        publisher = None
         async with asyncio.TaskGroup() as tasks:
             while True:
                 try:
                     if new_connection:
                         await self.post('connect', {})
                         new_connection = False
+                        publisher = tasks.create_task(self._publish_slash_catalog())
                         await self._publish_profile()
                     cards = self._live_cards()
                     row = await self.post('claim', {'backend': BACKEND, **({'approvals': cards} if cards else {})})
@@ -252,6 +270,9 @@ class RothcoldAgent(BasePlatformAdapter):
                         continue
                 except (ClientError, TimeoutError):
                     self._cards.clear()
+                    if publisher is not None:
+                        publisher.cancel()
+                        publisher = None
                     if not new_connection:
                         log.warning('Lost platform connection; pending delivery will not be replayed')
                     new_connection = True

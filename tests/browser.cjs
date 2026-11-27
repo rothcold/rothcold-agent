@@ -56,6 +56,120 @@ async function editorPaste(editor, text) {
   }, text);
 }
 
+async function exerciseSlashMenu(page, form, mobile) {
+  const editor = form.getByRole('textbox');
+  const menu = form.getByRole('listbox', {name:'Gateway suggestions'});
+  const status = menu.getByRole('option', {name:'/status',exact:true});
+  const skill = menu.getByRole('option', {name:'/sandbox-skill',exact:true});
+  const submissions = [];
+  const watch = r => {
+    if (r.method() === 'POST' && /\/api\/chats(?:\/[^/]+\/turns)?$/.test(r.url())) submissions.push(r.url());
+  };
+  page.on('request', watch);
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    if (mobile) {
+      await page.setViewportSize({width:375,height:760});
+      await cdp.send('Emulation.setTouchEmulationEnabled', {enabled:true});
+    }
+    await editor.pressSequentially('/');
+    await status.waitFor();
+    assert.equal(await menu.getByRole('option', {name:/^\/(approve|deny)$/}).count(), 0);
+    await editor.pressSequentially('s');
+    assert.equal(await menu.getByRole('group', {name:'Commands'}).getByRole('option').count(), mobile ? 2 : 3);
+    await menu.getByRole('group', {name:'Skills'}).getByRole('option', {name:'/sandbox-skill',exact:true}).waitFor();
+    if (!mobile) {
+      await editor.press('ArrowUp');
+      assert.equal(await skill.getAttribute('aria-selected'), 'true');
+      await editor.press('ArrowDown');
+      await editor.press('ArrowDown');
+      await editor.press('ArrowDown');
+      assert.equal(await status.getAttribute('aria-selected'), 'true');
+      assert.equal(await editor.getAttribute('aria-activedescendant'), await status.getAttribute('id'));
+    }
+    const shot = mobile ? 'slash-reply-375.png' : 'slash-new-thread-1100.png';
+    await assertLayout(page, mobile ? 375 : 1100, mobile ? 760 : 800, '.composer-slash-menu');
+    if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS, shot)});
+    await themeScreens(page, 'slash-menu', [
+      ['.composer-slash-menu legend'], ['.composer-slash-menu [role="option"]'],
+      ['.composer-slash-menu [aria-selected="true"]'],
+    ]);
+    if (mobile) {
+      await assertLayout(page, 375, 420, '#compose, .composer-slash-menu');
+      await page.setViewportSize({width:375,height:760});
+      await editor.pressSequentially('and');
+      assert.equal(await menu.getByRole('option').count(), 1);
+      const tap = await skill.boundingBox();
+      assert(tap && tap.height >= 44, JSON.stringify(tap));
+      const touchPoints = [{x:tap.x+tap.width/2, y:tap.y+tap.height/2}];
+      await cdp.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints});
+      await cdp.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+      await menu.waitFor({state:'hidden'});
+      assert.equal(await editorText(editor), '/sandbox-skill');
+      await page.getByRole('link', {name:'Back to General'}).click();
+      await page.locator('.category-threads').getByRole('link', {name:'First offline message',exact:true}).click();
+      await editor.waitFor();
+      assert.equal(await editorText(editor), '/sandbox-skill');
+      assert.equal(await menu.count(), 0, 'restoring a draft must not reopen the slash menu');
+    } else {
+      await editor.press('Enter');
+      await menu.waitFor({state:'hidden'});
+      assert.equal(await editorText(editor), '/status');
+      await editor.clear();
+      await editor.pressSequentially('/sandbox-skill');
+      const longer = menu.getByRole('option', {name:'/sandbox-skill-extension',exact:true});
+      await longer.waitFor();
+      assert.equal(await menu.getByRole('option').first().textContent(), '/sandbox-skill');
+      assert.equal(await skill.getAttribute('aria-selected'), 'true');
+      await editor.press('ArrowDown');
+      assert.equal(await longer.getAttribute('aria-selected'), 'true');
+      await editor.press('ArrowUp');
+      assert.equal(await skill.getAttribute('aria-selected'), 'true');
+      await editor.press('Enter');
+      assert.equal(await editorText(editor), '/sandbox-skill');
+      await editor.clear();
+      await editor.pressSequentially('/sand');
+      await skill.click();
+      assert.equal(await editorText(editor), '/sandbox-skill');
+      await editor.clear();
+      await editor.pressSequentially('/s');
+      await status.waitFor();
+      await editor.press('Escape');
+      assert.equal(await menu.count(), 0);
+      assert.equal(await editorText(editor), '/s');
+      await editor.clear();
+      await editor.focus();
+      await cdp.send('Input.imeSetComposition', {text:'/',selectionStart:1,selectionEnd:1});
+      await editor.evaluate(el => el.dispatchEvent(new KeyboardEvent('keydown', {
+        key:'Enter', keyCode:229, isComposing:true, bubbles:true, cancelable:true,
+      })));
+      assert.equal(await menu.count(), 0, 'IME Enter must not select or submit');
+      await cdp.send('Input.imeSetComposition', {text:'中文',selectionStart:2,selectionEnd:2});
+      await cdp.send('Input.insertText', {text:'中文'});
+      assert.equal(await editorText(editor), '中文');
+      assert.equal(await menu.count(), 0);
+      await editorPaste(editor, '/s');
+      assert.equal(await menu.count(), 0, 'pasting a slash must not open the menu');
+      await editor.clear();
+      await editor.pressSequentially('body /s');
+      assert.equal(await menu.count(), 0);
+      await editor.clear();
+      await form.getByRole('button', {name:'Code block',exact:true}).click();
+      await editor.pressSequentially('/s');
+      assert.equal(await editor.locator('pre').innerText(), '/s');
+      assert.equal(await menu.count(), 0);
+      await form.getByRole('button', {name:'Code block',exact:true}).click();
+    }
+    assert.deepEqual(submissions, [], 'accepting, dismissing and composing must not submit');
+    await editor.clear();
+  } finally {
+    await cdp.send('Emulation.setTouchEmulationEnabled', {enabled:false});
+    await cdp.detach();
+    await page.setViewportSize({width:1100,height:800});
+    page.off('request', watch);
+  }
+}
+
 async function shortDraftGeometry(heading, editor, draft) {
   assert.equal(await editorText(editor), draft);
   const title = await heading.evaluate(el => {
@@ -405,6 +519,11 @@ async function profilesAttachmentsAndMoves(page, origin) {
       return;
     }
     if (process.argv.includes('--offline')) {
+      const adapterPost = async (route,body) => {
+        const response = await fetch(apiOrigin+'/adapter/'+route,{method:'POST',headers:{Origin:apiOrigin,Authorization:'Bearer '+process.env.ROTHCOLD_AGENT_ADAPTER_TOKEN,'Content-Type':'application/json'},body:JSON.stringify(body)});
+        assert.equal(response.status,200); return response.json();
+      };
+      const slashCatalog = {catalog:{commands:['approve','deny','sethome','status'],skills:['sandbox-skill']}};
       const nativeLogin = await fetch(apiOrigin+'/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:process.env.ROTHCOLD_AGENT_OWNER_TOKEN,name:'Lost phone'})});
       assert.equal(nativeLogin.status,200);
       const lost = (await nativeLogin.json()).session;
@@ -469,6 +588,12 @@ async function profilesAttachmentsAndMoves(page, origin) {
           assert.equal(await btn.getAttribute('data-tip'), label);
         }
         const toolbar = form.getByRole('toolbar', { name: 'Formatting' });
+        await toolbar.waitFor();
+        const mobile = selector === '#compose';
+        await adapterPost('slash-catalog', mobile ? slashCatalog : {
+          catalog: {...slashCatalog.catalog, commands:[...slashCatalog.catalog.commands, 'sandbox-skill-extension']},
+        });
+        await exerciseSlashMenu(page, form, mobile);
         await toolbar.waitFor();
         const boldButton = toolbar.getByRole('button', { name: 'Bold' });
         const boldBox = await boldButton.boundingBox();
@@ -715,6 +840,7 @@ async function profilesAttachmentsAndMoves(page, origin) {
       await page.getByLabel('Category name').fill('Late A category');
       await page.getByRole('button',{name:'Create category'}).click();
       await written;
+      await adapterPost('slash-catalog', slashCatalog);
       await changeServer();
       const alternate = 'http://127.0.0.1:8770';
       await address.fill(alternate);
@@ -727,6 +853,14 @@ async function profilesAttachmentsAndMoves(page, origin) {
       await page.getByRole('button',{name:'Open workspace'}).click();
       await page.getByRole('heading',{name:'General'}).waitFor();
       assert.equal(await original.count(),0);
+      const backendBEditor = page.getByRole('textbox', {name:'New thread in General'});
+      await backendBEditor.pressSequentially('/s');
+      await page.getByText('Gateway suggestions unavailable. You can still type commands manually.', {exact:true}).waitFor();
+      assert.equal(await page.getByRole('option', {name:'/sandbox-skill',exact:true}).count(),0);
+      await backendBEditor.press('Escape');
+      await backendBEditor.pressSequentially('tatus');
+      assert.equal(await editorText(backendBEditor),'/status');
+      await backendBEditor.clear();
       assert.equal(await editorText(page.getByLabel('New thread in General')),'');
       const response = page.waitForResponse(r => r.url().endsWith('/api/channels') && r.request().method() === 'POST');
       releaseCategory();
@@ -790,10 +924,6 @@ async function profilesAttachmentsAndMoves(page, origin) {
       await page.getByRole('heading',{name:'First offline message'}).waitFor();
       assert.equal(page.url(),first);
       assert.equal(await editorText(page.getByLabel('Your message')),'Unsent reply');
-      const adapterPost = async (route,body) => {
-        const response = await fetch(apiOrigin+'/adapter/'+route,{method:'POST',headers:{Origin:apiOrigin,Authorization:'Bearer '+process.env.ROTHCOLD_AGENT_ADAPTER_TOKEN,'Content-Type':'application/json'},body:JSON.stringify(body)});
-        assert.equal(response.status,200); return response.json();
-      };
       const old = await adapterPost('claim',{});
       assert.equal(old.text,'First offline message');
       await adapterPost('admission',{id:old.id,accepted:false});
@@ -1276,13 +1406,29 @@ async function profilesAttachmentsAndMoves(page, origin) {
       ]);
     }
     const approvalEditor = page.getByRole('textbox', {name:'Your message'});
-    await approvalEditor.pressSequentially('/approve session');
+    const approvalPosts = [];
+    const observeApproval = request => {
+      if (request.method() === 'POST' && request.url().endsWith('/turns'))
+        approvalPosts.push(request.postDataJSON());
+    };
+    page.on('request', observeApproval);
+    await approvalEditor.pressSequentially('/ap');
+    await page.getByRole('option', {name:'/approvals',exact:true}).waitFor();
+    const approveSuggestion = page.getByRole('option', {name:'/approve',exact:true});
+    await approveSuggestion.waitFor();
+    if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,'slash-approval-375.png')});
+    await approveSuggestion.click();
+    assert.equal(await editorText(approvalEditor), '/approve');
+    assert.equal(await page.getByRole('listbox', {name:'Gateway suggestions'}).count(),0);
+    await approvalEditor.pressSequentially(' session');
     const decision = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/turns'));
     await approvalEditor.press('Enter');
     const approved = (await decision).postDataJSON();
     assert.equal(approved.text, '/approve session');
     assert(approved.approval, 'the slash draft is pinned to the live approval');
     await page.getByText('Hermes received your decision: session.',{exact:false}).waitFor();
+    page.off('request', observeApproval);
+    assert.deepEqual(approvalPosts, [approved], 'selecting an approval must not submit it');
     assert.equal(await page.locator('article').count(),1);
     for (const width of [1100,375]) {
       await page.setViewportSize({width,height:800});

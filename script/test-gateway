@@ -24,6 +24,9 @@ platforms:
   api_server: {enabled: false}
 platform_toolsets:
   rothcold_agent: []
+skills:
+  platform_disabled:
+    rothcold_agent: [rothcold-disabled-skill]
 model:
   provider: custom
   default: local-fixture

@@ -883,6 +883,33 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
                          [dict(req, state='queued', answer=None, updates=[])])
         self.assertEqual(await self.get('/api/notifications'), [])
 
+    async def test_thread_title_adapter_boundary_and_single_use(self):
+        await self.adapter.disconnect()
+        await self.login()
+        chat = str(uuid4())
+        opener = {'id': chat, 'text': 'First title prompt'}
+        self.assertEqual((await self.post('/api/chats', opener)).status, 202)
+        claim_path = ORIGIN + '/adapter/title-claim'
+        result_path = ORIGIN + '/adapter/title-result'
+        self.assertEqual((await self.post('/adapter/title-claim', {})).status, 401)
+        self.assertEqual((await self.client.post(claim_path, json={}, headers=self.bridge_bearer)).status, 403)
+        async with self.client.post(claim_path, json={}, headers=self.bridge) as response:
+            self.assertEqual(response.status, 200)
+            job = await response.json()
+        self.assertEqual(job['text'], opener['text'])
+        self.assertEqual(set(job), {'claim', 'text'})
+        for title in ('a\nb', 'x' * 81, 'a\u2028b'):
+            async with self.client.post(result_path, json=dict(job, title=title), headers=self.bridge) as response:
+                self.assertEqual(response.status, 400)
+        for title in ('Semantic title', 'Duplicate result'):
+            async with self.client.post(result_path, json={'claim': job['claim'], 'title': title},
+                                        headers=self.bridge) as response:
+                self.assertEqual(response.status, 200)
+        self.assertEqual(await self.get('/api/chats'), [{'id': chat, 'title': 'Semantic title', 'channel': 'general'}])
+        self.assertEqual(await self.get(f'/api/chats/{chat}/turns'),
+                         [dict(opener, state='queued', answer=None, updates=[])])
+        self.assertEqual(await self.get('/api/notifications'), [])
+
     async def test_channels(self):
         await self.login()
         response = await self.post('/api/channels', {'name': '  Research  '})

@@ -964,18 +964,56 @@ type WorkspaceProps = {
 function useWorkspaceDirectory(server: string, report: Report) {
 	const [channels, setChannels] = useState<Channel[]>([]);
 	const [chats, setChats] = useState<Chat[]>([]);
+	const threadRevision = useRef(0);
 	useEffect(() => {
-		async function load() {
-			const [groups, threads] = await Promise.all([
-				api<Channel[]>("channels", server),
-				api<Chat[]>("chats", server),
-			]);
-			setChannels(groups);
-			setChats(threads);
+		let active = true;
+		let timer: number;
+		async function refreshTitles() {
+			const revision = threadRevision.current;
+			try {
+				const threads = await api<Chat[]>("chats", server);
+				if (active && revision === threadRevision.current) {
+					const titles = new Map(threads.map(({ id, title }) => [id, title]));
+					setChats((list) => {
+						let changed = false;
+						const next = list.map((chat) => {
+							const title = titles.get(chat.id);
+							if (title === undefined || title === chat.title) return chat;
+							changed = true;
+							return { ...chat, title };
+						});
+						return changed ? next : list;
+					});
+				}
+			} catch {
+				// A background title refresh cannot block workspace use.
+			} finally {
+				if (active) timer = window.setTimeout(refreshTitles, 4000);
+			}
 		}
-		void load().catch((e) => report(failure(e)));
+		async function load() {
+			try {
+				const [groups, threads] = await Promise.all([
+					api<Channel[]>("channels", server),
+					api<Chat[]>("chats", server),
+				]);
+				if (active) {
+					setChannels(groups);
+					setChats(threads);
+					timer = window.setTimeout(refreshTitles, 4000);
+				}
+			} catch (e) {
+				if (active) report(failure(e));
+			}
+		}
+		void load();
+		return () => {
+			active = false;
+			clearTimeout(timer);
+		};
 	}, [server, report]);
 	function recordThread(thread: Chat) {
+		threadRevision.current += 1;
 		setChats((list) => [
 			thread,
 			...list.filter((chat) => chat.id !== thread.id),
@@ -985,6 +1023,7 @@ function useWorkspaceDirectory(server: string, report: Report) {
 		setChannels((list) => [...list, channel]);
 	}
 	function updateThread(id: string, patch: Partial<Chat>) {
+		threadRevision.current += 1;
 		setChats((list) =>
 			list.map((chat) => (chat.id === id ? { ...chat, ...patch } : chat)),
 		);

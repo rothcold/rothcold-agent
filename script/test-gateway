@@ -31,7 +31,8 @@ model:
   base_url: http://127.0.0.1:8767/v1
 auxiliary:
   title_generation:
-    enabled: false
+    enabled: true
+    language: Japanese
 YAML
 # Hide the real home (including the Hermes profile), except the read-only code/venv.
 set --

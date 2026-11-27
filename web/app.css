@@ -430,6 +430,14 @@ kbd {
 	color: var(--muted);
 	font-size: var(--label);
 }
+.archive-link {
+	margin-block: 8px;
+	padding-inline: 8px;
+	border-radius: 6px;
+}
+.archive-link[aria-current="page"] {
+	background: var(--chrome);
+}
 .category-row {
 	display: flex;
 	align-items: stretch;
@@ -631,6 +639,12 @@ summary {
 .thread-row-title {
 	overflow-wrap: anywhere;
 }
+.thread-row-meta {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 4px;
+}
 .thread-row-icon {
 	width: 32px;
 	height: 32px;
@@ -649,6 +663,25 @@ summary {
 .category-pane .pane-scroll,
 #turns {
 	padding-inline: var(--content-pad);
+}
+.category-menu {
+	margin-top: 8px;
+	font-size: var(--small);
+}
+.category-menu form {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 8px;
+}
+.category-menu input {
+	max-width: 100%;
+}
+.archive-notice {
+	padding: 12px var(--content-pad);
+	border-top: 1px solid var(--line);
+	color: var(--muted);
 }
 .conversation {
 	--avatar: 34px;
@@ -699,6 +732,9 @@ summary {
 :where(.conversation) .pane-head form {
 	max-width: var(--readable);
 	padding-top: 8px;
+}
+.thread-tools form {
+	padding-top: 0;
 }
 #turns {
 	flex: 1;
@@ -1076,6 +1112,13 @@ summary {
 .items small[data-unread="true"] {
 	color: var(--accent);
 }
+.inbox-thread-title {
+	font-weight: 700;
+}
+.inbox-preview {
+	color: var(--muted);
+	font-size: var(--small);
+}
 .settings-connection {
 	padding-block: 0 16px;
 	margin-bottom: 16px;
@@ -1284,7 +1327,8 @@ summary {
 		min-height: var(--target);
 	}
 	.recovery summary,
-	.activity-details summary {
+	.activity-details summary,
+	.category-menu summary {
 		min-height: var(--target);
 		align-content: center;
 	}

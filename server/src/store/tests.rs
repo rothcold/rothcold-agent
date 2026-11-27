@@ -1,4 +1,4 @@
-use super::*;
+use super::{archive::active_chats as chats, inbox::notifications, *};
 
 fn empty() -> Result<Connection> {
     let mut db = Connection::open_in_memory()?;
@@ -9,7 +9,9 @@ fn empty() -> Result<Connection> {
 fn restore_v4_shape(db: &Connection) -> SqlResult<()> {
     db.execute_batch(
         "DROP TABLE backend_profiles; DROP TABLE identities; DROP TABLE attachments;
-        ALTER TABLE placement DROP COLUMN original_channel; PRAGMA user_version=4;",
+        ALTER TABLE placement DROP COLUMN original_channel;
+        ALTER TABLE chats DROP COLUMN archived; ALTER TABLE channels DROP COLUMN archived;
+        ALTER TABLE notifications DROP COLUMN preview; PRAGMA user_version=4;",
     )
 }
 
@@ -128,7 +130,7 @@ fn owner_can_release_only_an_unknown_turn_and_late_final_stays_correlated() -> R
     assert!(rows[1]["answer"].is_null());
     assert_eq!(
         notifications(&db)?,
-        json!([{"chat":"a","request":"a","channel":"general","unread":1}])
+        json!([{"chat":"a","request":"a","channel":"general","unread":1,"title":"original","preview":"late reply"}])
     );
     finish(&mut db, "a", "b", "next final")?;
     assert!(stop_waiting(&db, "a", "b").is_err());
@@ -159,7 +161,7 @@ fn opening_and_final_are_atomic_and_replay_safe() -> Result<()> {
     assert!(finish(&mut db, "a", "a", "changed").is_err());
     assert_eq!(
         notifications(&db)?,
-        json!([{"chat":"a","request":"a","channel":"general","unread":0}])
+        json!([{"chat":"a","request":"a","channel":"general","unread":0,"title":"hello","preview":"reply"}])
     );
     Ok(())
 }
@@ -238,8 +240,8 @@ fn unsolicited_push_commits_with_notification_and_respects_unknown_turns() -> Re
     assert_eq!(
         notifications(&db)?,
         json!([
-            {"request":"p1","chat":"a","channel":"general","unread":1},
-            {"request":"a","chat":"a","channel":"general","unread":0}
+            {"request":"p1","chat":"a","channel":"general","unread":1,"title":"hello","preview":"Cron report"},
+            {"request":"a","chat":"a","channel":"general","unread":0,"title":"hello","preview":"hi"}
         ])
     );
     // Does not block subsequent queued user turns.
@@ -265,7 +267,7 @@ fn version_three_adds_device_sessions_without_touching_workspace() -> Result<()>
          INSERT INTO notifications VALUES ('turn',0);",
     )?;
     init(&mut db)?;
-    assert_eq!(count(&db, "PRAGMA user_version", [])?, 5);
+    assert_eq!(count(&db, "PRAGMA user_version", [])?, 6);
     assert_eq!(count(&db, "SELECT count(*) FROM device_sessions", [])?, 0);
     assert_eq!(
         count(
@@ -308,7 +310,7 @@ fn version_four_migrates_move_and_preserves_original_enqueue_receipt_and_notific
     restore_v4_shape(&db)?;
     init(&mut db)?;
     init(&mut db)?;
-    assert_eq!(count(&db, "PRAGMA user_version", [])?, 5);
+    assert_eq!(count(&db, "PRAGMA user_version", [])?, 6);
     assert!(matches!(
         move_thread(&db, "missing", &to),
         Err(Error::Missing)
@@ -337,7 +339,7 @@ fn version_four_migrates_move_and_preserves_original_enqueue_receipt_and_notific
     assert_eq!(history(&db, "chat")?, history_before);
     assert_eq!(
         notifications(&db)?,
-        json!([{"request":"chat","chat":"chat","channel":to,"unread":1}])
+        json!([{"request":"chat","chat":"chat","channel":to,"unread":1,"title":"Original title","preview":"Reply"}])
     );
     Ok(())
 }
@@ -409,5 +411,58 @@ fn attachments_link_atomically_and_only_exact_replay_can_reuse_them() -> Result<
             .len(),
         1
     );
+    Ok(())
+}
+
+#[test]
+fn version_five_adds_independent_archive_flags_and_previews_without_creating_notices() -> Result<()>
+{
+    let mut db = empty()?;
+    let from = category(&mut db, "Original")?["id"]
+        .as_str()
+        .ok_or(Error::Missing)?
+        .to_string();
+    enqueue(&mut db, "chat", "chat", "A saved thread", Some(&from), &[])?;
+    claim(&mut db)?;
+    finish(&mut db, "chat", "chat", "**Present reply**")?;
+    push(&mut db, "chat", "push", "# Delivery")?;
+    push(&mut db, "chat", "historical", "Not a notice")?;
+    db.execute("DELETE FROM notifications WHERE request='historical'", [])?;
+    mark_reply_read(&db, "chat", "chat")?;
+    move_thread(&db, "chat", "general")?;
+    let before = history(&db, "chat")?;
+    db.execute_batch(
+        "ALTER TABLE channels DROP COLUMN archived;
+        ALTER TABLE chats DROP COLUMN archived;
+        ALTER TABLE notifications DROP COLUMN preview;
+        PRAGMA user_version=5;",
+    )?;
+
+    init(&mut db)?;
+    assert_eq!(count(&db, "PRAGMA user_version", [])?, 6);
+    assert_eq!(history(&db, "chat")?, before);
+    let directory = archive::directory(&db)?;
+    assert_eq!(
+        directory["chats"],
+        json!([{"id":"chat","title":"A saved thread","channel":"general","archived":0}])
+    );
+    assert_eq!(
+        directory["channels"][1],
+        json!({"id":from,"name":"Original","archived":0})
+    );
+    assert!(!enqueue(&mut db, "chat", "chat", "A saved thread", Some(&from), &[])?.0);
+    assert_eq!(
+        notifications(&db)?,
+        json!([
+            {"request":"push","chat":"chat","channel":"general","title":"A saved thread","preview":"Delivery","unread":1},
+            {"request":"chat","chat":"chat","channel":"general","title":"A saved thread","preview":"Present reply","unread":0}
+        ])
+    );
+    archive::set_thread_archived(&db, "chat", true)?;
+    archive::set_category_archived(&db, &from, true)?;
+    let archived = archive::directory(&db)?;
+    init(&mut db)?;
+    assert_eq!(archive::directory(&db)?, archived);
+    assert_eq!(history(&db, "chat")?, before);
     Ok(())
 }

@@ -249,7 +249,7 @@ function apiMethod(path, method) {
 		)
 	)
 		return method === "POST";
-	if (/^\/api\/(?:me|sessions|notifications)$/.test(path))
+	if (/^\/api\/(?:me|sessions|notifications|directory)$/.test(path))
 		return method === "GET";
 	if (
 		/^\/api\/(?:chats|channels|profile|chats\/[A-Za-z0-9_-]+\/turns)$/.test(
@@ -259,9 +259,10 @@ function apiMethod(path, method) {
 		return true;
 	return (
 		method === "POST" &&
-		/^\/api\/chats\/[A-Za-z0-9_-]+\/(?:rename|move|read(?:\/[A-Za-z0-9_-]+)?|turns\/[A-Za-z0-9_-]+\/stop-waiting)$/.test(
+		(/^\/api\/chats\/[A-Za-z0-9_-]+\/(?:archive|rename|move|read(?:\/[A-Za-z0-9_-]+)?|turns\/[A-Za-z0-9_-]+\/stop-waiting)$/.test(
 			path,
-		)
+		) ||
+			/^\/api\/channels\/[A-Za-z0-9_-]+\/(?:archive|rename)$/.test(path))
 	);
 }
 

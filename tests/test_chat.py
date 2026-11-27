@@ -612,7 +612,8 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.message_id,'reply:'+req['id'])
         self.assertFalse((await self.adapter.edit_message(chat, progress.message_id, 'late edit')).success)
         inbox = ORIGIN+'/api/notifications'
-        event_row = {'request':req['id'], 'chat':chat, 'channel':'general', 'unread':1}
+        event_row = {'request':req['id'], 'chat':chat, 'channel':'general', 'unread':1,
+                     'title':'Ordinary message', 'preview':'One plain-text answer.'}
         async def entries():
             return [row for row in await (await self.client.get(inbox, headers=self.auth)).json() if row['chat']==chat]
         for _ in range(2):
@@ -647,7 +648,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.data_dir/'history.sqlite3')) as db, db:
             for index in range(24):
                 chat = str(uuid4())
-                db.execute('INSERT INTO chats VALUES(?,?)', (chat, f'Research fixture {index+1}'))
+                db.execute('INSERT INTO chats(id,title) VALUES(?,?)', (chat, f'Research fixture {index+1}'))
                 db.execute('INSERT INTO placement(chat,channel,original_channel) VALUES(?,?,?)', (chat, target, target))
         await self.start_web()
 
@@ -736,6 +737,23 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
                 await p.wait()
 
     @unittest.skipUnless(os.environ.get('PLAYWRIGHT_DIR'), 'No local Playwright + Chromium')
+    async def test_browser_archive_and_inbox_previews(self):
+        async def handler(event):
+            return {'Park this thread': '## First archive reply',
+                    'Reply again': '**Second archive reply**'}.get(event.text, 'Fixture delivered')
+
+        self.adapter.set_message_handler(handler)
+        await self.start_web()
+        browser = await asyncio.create_subprocess_exec(
+            os.environ['NODE'], ROOT/'tests/browser.cjs', '--archive',
+            env=dict(os.environ, TMPDIR=BROWSER_TMP))
+        try:
+            self.assertEqual(await asyncio.wait_for(browser.wait(), 75), 0)
+        finally:
+            if browser.returncode is None:
+                browser.kill()
+                await browser.wait()
+
     async def test_browser_offline(self):
         await self.adapter.disconnect()
         alternate = 'http://127.0.0.1:8770'
@@ -808,6 +826,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
                 while not (cards := [u for u in (await self.get(path))[0]['updates'] if u.get('choices')]):
                     await asyncio.sleep(.05)
             self.assertEqual(calls, ['Fixture approval'])
+            self.assertEqual((await self.post(f'/api/chats/{rid}/archive', {'archived': True})).status, 200)
             answer = {'id':str(uuid4()), 'text':'/approve session', 'approval':cards[0]['id']}
             self.assertEqual((await self.post('/api/chats/other/turns', answer)).status,409)
             self.assertEqual((await self.post(path, dict(answer, text='/approve always'))).status,400)
@@ -819,6 +838,72 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([r['answer'] for r in rows], ['Decision: session','Next task done.'])
             self.assertEqual(len(await self.get('/api/notifications')),2)
             self.assertEqual((await self.post(path, answer)).status,409)
+
+    async def test_archive_is_reversible_without_changing_queue_or_inbox_correlation(self):
+        await self.adapter.disconnect()
+        directory_path = '/api/directory'
+        self.assertEqual((await self.client.get(ORIGIN + directory_path)).status, 401)
+        await self.login()
+        category = await (await self.post('/api/channels', {'name': 'Research'})).json()
+        cat = category['id']
+        for invalid, status in [('  ', 400), ('GENERAL', 409)]:
+            self.assertEqual((await self.post(f'/api/channels/{cat}/rename', {'name': invalid})).status, status)
+        self.assertEqual((await self.post('/api/channels/general/rename', {'name': 'Home'})).status, 200)
+        self.assertEqual((await self.post('/api/channels/general/archive', {'archived': True})).status, 409)
+        self.assertEqual((await self.post(f'/api/channels/{cat}/rename', {'name': ' Notes '})).status, 200)
+        a, b, queued, push, general = (str(uuid4()) for _ in range(5))
+        first = {'id': a, 'channel': cat, 'text': 'A thread'}
+        path = f'/api/chats/{a}/turns'
+        next_turn = {'id': queued, 'text': 'Already queued'}
+        self.assertEqual((await self.post('/api/chats', first)).status, 202)
+        self.assertEqual((await self.post(path, next_turn)).status, 202)
+        self.assertEqual((await self.post('/api/chats', {'id': b, 'channel': cat, 'text': 'B thread'})).status, 202)
+        defaulted = await self.post('/api/chats', {'id': general, 'text': 'No category supplied'})
+        self.assertEqual((defaulted.status, (await defaulted.json())['channel']), (202, 'general'))
+
+        async def adapter(route, payload):
+            return await self.client.post(ORIGIN + '/adapter/' + route, headers=self.bridge, json=payload)
+
+        self.assertEqual((await (await adapter('claim', {})).json())['id'], a)
+        self.assertEqual((await adapter('admission', {'id': a, 'accepted': True})).status, 200)
+        self.assertEqual((await adapter('connect', {})).status, 200)
+        self.assertEqual((await self.get(path))[0]['state'], 'unknown')
+        self.assertEqual((await self.post(f'/api/chats/{a}/archive', {'archived': True})).status, 200)
+        self.assertEqual((await self.post(f'/api/channels/{cat}/archive', {'archived': True})).status, 200)
+        self.assertEqual(await self.get('/api/channels'), [{'id': 'general', 'name': 'Home'}])
+        self.assertEqual([c['id'] for c in await self.get('/api/chats')], [general])
+        directory = await self.get(directory_path)
+        self.assertEqual([(c['name'], c['archived']) for c in directory['channels']], [('Home', 0), ('Notes', 1)])
+        self.assertEqual({c['id']: c['archived'] for c in directory['chats']}, {general: 0, b: 0, a: 1})
+        self.assertEqual((await self.post('/api/chats', first)).status, 200)
+        self.assertEqual((await self.post(path, next_turn)).status, 200)
+        self.assertEqual((await self.post(path, dict(next_turn, text='Different input'))).status, 409)
+        self.assertEqual((await self.post('/api/chats', dict(first, id=str(uuid4())))).status, 409)
+        self.assertEqual((await self.post(f'/api/chats/{b}/turns', {'id': str(uuid4()), 'text': 'New input'})).status, 409)
+        self.assertEqual((await self.post(f'/api/chats/{b}/move', {'channel': 'general'})).status, 409)
+        self.assertEqual((await self.post(f'/api/chats/{general}/move', {'channel': cat})).status, 409)
+        self.assertEqual((await self.post(f'{path}/{a}/stop-waiting', {})).status, 200)
+        self.assertEqual((await (await adapter('claim', {})).json())['id'], queued)
+        self.assertEqual((await adapter('final', {'chat': a, 'id': a, 'text': '## Late **reply**'})).status, 200)
+        self.assertEqual((await self.post(f'/api/chats/{a}/read/{a}', {})).status, 200)
+        self.assertEqual((await adapter('final', {'chat': a, 'id': queued, 'text': 'Second reply'})).status, 200)
+        body = f"**{'云' * 139}👩🏽‍🚀** End"
+        for _ in range(2):
+            self.assertEqual((await adapter('push', {'chat': a, 'id': push, 'text': body})).status, 200)
+        for _ in range(2):
+            notices = await self.get('/api/notifications')
+            self.assertEqual([(n['request'], n['title'], n['preview'], n['unread']) for n in notices],
+                             [(push, 'A thread', '云' * 139 + '👩🏽‍🚀…', 1),
+                              (queued, 'A thread', 'Second reply', 1), (a, 'A thread', 'Late reply', 0)])
+        self.assertEqual([(t['state'], t['answer']) for t in await self.get(path)],
+                         [('released', '## Late **reply**'), ('answered', 'Second reply'), ('answered', body)])
+
+        self.assertEqual((await self.post(f'/api/channels/{cat}/archive', {'archived': False})).status, 200)
+        self.assertEqual([c['id'] for c in await self.get('/api/chats')], [general, b])
+        new_turn = {'id': str(uuid4()), 'text': 'After restore'}
+        self.assertEqual((await self.post(path, new_turn)).status, 409)
+        self.assertEqual((await self.post(f'/api/chats/{a}/archive', {'archived': False})).status, 200)
+        self.assertEqual((await self.post(path, new_turn)).status, 202)
 
     async def test_approval_is_not_a_fifo_turn(self):
         await self.adapter.disconnect()
@@ -969,7 +1054,12 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
     async def test_existing_python_workspace(self):
         await self.login()
         self.assertEqual(await self.get('/api/chats'), [{'id':'old','title':'Old title','channel':'general'}])
-        self.assertEqual(await self.get('/api/notifications'), [{'request':'one','chat':'old','channel':'general','unread':0}])
+        self.assertEqual(await self.get('/api/notifications'),
+                         [{'request':'one','chat':'old','channel':'general','unread':0,
+                           'title':'Old title','preview':'旧回复'}])
+        directory = await self.get('/api/directory')
+        self.assertEqual(directory, {'channels':[{'id':'general','name':'General','archived':0}],
+                                     'chats':[{'id':'old','title':'Old title','channel':'general','archived':0}]})
         rows = await self.get('/api/chats/old/turns')
         self.assertEqual([(r['id'],r['state'],r['answer']) for r in rows],
                          [('one','answered','旧回复'),('two','unknown',None),('three','queued',None)])

@@ -264,22 +264,56 @@ async fn checked(app: App, mut req: Request, next: Next) -> Result<Response> {
     Ok(next.run(req).await)
 }
 async fn channels(State(a): State<App>) -> Result<Json<Value>> {
-    Ok(Json(store::channels(&lock(&a.db))?))
+    Ok(Json(store::archive::active_channels(&lock(&a.db))?))
+}
+fn category_name(v: &Value) -> Result<&str> {
+    let name = field(v, "name", 80)?.trim();
+    if name.chars().any(char::is_control) {
+        return Err(BAD);
+    }
+    Ok(name)
 }
 async fn category(State(a): State<App>, Extension(v): Input) -> Result<(S, Json<Value>)> {
     Ok((
         S::CREATED,
-        Json(store::category(
-            &mut lock(&a.db),
-            field(&v, "name", 80)?.trim(),
-        )?),
+        Json(store::category(&mut lock(&a.db), category_name(&v)?)?),
     ))
 }
+async fn rename_category(
+    State(a): State<App>,
+    Path(id): Path<String>,
+    Extension(v): Input,
+) -> Result<Json<Value>> {
+    let name = category_name(&v)?;
+    store::archive::rename_category(&lock(&a.db), &id, name)?;
+    Ok(Json(json!({"name":name})))
+}
+async fn archive_category(
+    State(a): State<App>,
+    Path(id): Path<String>,
+    Extension(v): Input,
+) -> Result<Json<Value>> {
+    let archived = v["archived"].as_bool().ok_or(BAD)?;
+    store::archive::set_category_archived(&lock(&a.db), &id, archived)?;
+    Ok(Json(json!({"archived":u8::from(archived)})))
+}
+async fn archive_thread(
+    State(a): State<App>,
+    Path(id): Path<String>,
+    Extension(v): Input,
+) -> Result<Json<Value>> {
+    let archived = v["archived"].as_bool().ok_or(BAD)?;
+    store::archive::set_thread_archived(&lock(&a.db), &id, archived)?;
+    Ok(Json(json!({"archived":u8::from(archived)})))
+}
+async fn directory(State(a): State<App>) -> Result<Json<Value>> {
+    Ok(Json(store::archive::directory(&lock(&a.db))?))
+}
 async fn chats(State(a): State<App>) -> Result<Json<Value>> {
-    Ok(Json(store::chats(&lock(&a.db))?))
+    Ok(Json(store::archive::active_chats(&lock(&a.db))?))
 }
 async fn notifications(State(a): State<App>) -> Result<Json<Value>> {
-    Ok(Json(store::notifications(&lock(&a.db))?))
+    Ok(Json(store::inbox::notifications(&lock(&a.db))?))
 }
 async fn history(State(a): State<App>, Path(chat): Path<String>) -> Result<Json<Value>> {
     let mut rows = store::history(&lock(&a.db), &chat)?;
@@ -499,8 +533,12 @@ async fn main() -> std::io::Result<()> {
         .route("/api/attachments", post(attachments::upload))
         .route("/api/attachments/{id}", get(attachments::view))
         .route("/api/attachments/{id}/download", get(attachments::download))
+        .route("/api/directory", get(directory))
         .route("/api/channels", get(channels).post(category))
+        .route("/api/channels/{id}/rename", post(rename_category))
+        .route("/api/channels/{id}/archive", post(archive_category))
         .route("/api/chats", get(chats).post(start))
+        .route("/api/chats/{id}/archive", post(archive_thread))
         .route("/api/notifications", get(notifications))
         .route("/api/chats/{chat}/read", post(read))
         .route("/api/chats/{chat}/read/{id}", post(read_reply))

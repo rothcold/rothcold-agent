@@ -93,7 +93,8 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
         assert request('/api/chats',dict(msg,channel=channel),token)==(200,thread)
         assert request(path,msg,token)[0]==200
         assert [{k:r[k] for k in ('id','text','state','answer')} for r in request(path,None,token)[1]] == expected
-        events=[{'request':m['id'],'chat':chat,'channel':channel,'unread':1} for m in (second,msg)]
+        events=[{'request':m['id'],'chat':chat,'channel':channel,'unread':1,
+                 'title':msg['text'],'preview':'Local fixture reply.'} for m in (second,msg)]
         for _ in range(2):
             assert request('/api/notifications',None,token)[1] == events
         assert request('/api/chats',None,token)[1] == [{'id':chat,'title':msg['text'],'channel':channel}]

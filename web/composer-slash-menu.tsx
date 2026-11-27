@@ -75,11 +75,41 @@ function useSlashCatalog(server: string, open: boolean) {
 	return value?.server === server ? value.catalog : undefined;
 }
 
+type ApprovalSuggestion = (choice: "once" | "deny") => boolean;
+
+function slashMatches(
+	catalog: SlashCatalog | null | undefined,
+	query: string | null,
+	canSuggestApproval?: ApprovalSuggestion,
+) {
+	if (!catalog || query === null) return [];
+	const matches = groups.map(({ key, label }) => ({
+		label,
+		names: catalog[key].filter((name) => {
+			if (!name.startsWith(query)) return false;
+			if (name === "approve" || name === "deny")
+				return Boolean(
+					canSuggestApproval?.(name === "approve" ? "once" : "deny"),
+				);
+			return true;
+		}),
+	}));
+	// Promote an exact match ahead of prefixes without separating it from its group.
+	const groupIndex = matches.findIndex(({ names }) => names.includes(query));
+	if (groupIndex >= 0) {
+		const [exact] = matches.splice(groupIndex, 1);
+		exact.names.splice(exact.names.indexOf(query), 1);
+		exact.names.unshift(query);
+		matches.unshift(exact);
+	}
+	return matches;
+}
+
 export function useComposerSlashMenu(
 	id: string,
 	server: string,
 	blocked: boolean,
-	canSuggestApproval?: (choice: "once" | "deny") => boolean,
+	canSuggestApproval?: ApprovalSuggestion,
 ) {
 	const [query, setQuery] = useState<string | null>(null);
 	const activeQuery = useRef<string | null>(null);
@@ -89,17 +119,7 @@ export function useComposerSlashMenu(
 	const catalog = useSlashCatalog(server, open);
 	const menuId = `${id}-slash-options`;
 	const listRef = useRef<HTMLDivElement>(null);
-	const matches = groups.map(({ key, label }) => ({
-		label,
-		names: (catalog?.[key] ?? []).filter((name) => {
-			if (query === null || !name.startsWith(query)) return false;
-			if (name === "approve" || name === "deny")
-				return Boolean(
-					canSuggestApproval?.(name === "approve" ? "once" : "deny"),
-				);
-			return true;
-		}),
-	}));
+	const matches = slashMatches(catalog, query, canSuggestApproval);
 	const names = matches.flatMap((group) => group.names);
 	const selected = names.length
 		? Math.max(0, names.indexOf(highlighted ?? ""))

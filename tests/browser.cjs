@@ -75,11 +75,12 @@ async function exerciseSlashMenu(page, form, mobile) {
     await status.waitFor();
     assert.equal(await menu.getByRole('option', {name:/^\/(approve|deny)$/}).count(), 0);
     await editor.pressSequentially('s');
-    assert.equal(await menu.getByRole('group', {name:'Commands'}).getByRole('option').count(), 2);
+    assert.equal(await menu.getByRole('group', {name:'Commands'}).getByRole('option').count(), mobile ? 2 : 3);
     await menu.getByRole('group', {name:'Skills'}).getByRole('option', {name:'/sandbox-skill',exact:true}).waitFor();
     if (!mobile) {
       await editor.press('ArrowUp');
       assert.equal(await skill.getAttribute('aria-selected'), 'true');
+      await editor.press('ArrowDown');
       await editor.press('ArrowDown');
       await editor.press('ArrowDown');
       assert.equal(await status.getAttribute('aria-selected'), 'true');
@@ -109,6 +110,18 @@ async function exerciseSlashMenu(page, form, mobile) {
       await editor.press('Enter');
       await menu.waitFor({state:'hidden'});
       assert.equal(await editorText(editor), '/status');
+      await editor.clear();
+      await editor.pressSequentially('/sandbox-skill');
+      const longer = menu.getByRole('option', {name:'/sandbox-skill-extension',exact:true});
+      await longer.waitFor();
+      assert.equal(await menu.getByRole('option').first().textContent(), '/sandbox-skill');
+      assert.equal(await skill.getAttribute('aria-selected'), 'true');
+      await editor.press('ArrowDown');
+      assert.equal(await longer.getAttribute('aria-selected'), 'true');
+      await editor.press('ArrowUp');
+      assert.equal(await skill.getAttribute('aria-selected'), 'true');
+      await editor.press('Enter');
+      assert.equal(await editorText(editor), '/sandbox-skill');
       await editor.clear();
       await editor.pressSequentially('/sand');
       await skill.click();
@@ -564,8 +577,11 @@ async function profilesAttachmentsAndMoves(page, origin) {
         }
         const toolbar = form.getByRole('toolbar', { name: 'Formatting' });
         await toolbar.waitFor();
-        await adapterPost('slash-catalog', slashCatalog);
-        await exerciseSlashMenu(page, form, selector === '#compose');
+        const mobile = selector === '#compose';
+        await adapterPost('slash-catalog', mobile ? slashCatalog : {
+          catalog: {...slashCatalog.catalog, commands:[...slashCatalog.catalog.commands, 'sandbox-skill-extension']},
+        });
+        await exerciseSlashMenu(page, form, mobile);
         await toolbar.waitFor();
         const boldButton = toolbar.getByRole('button', { name: 'Bold' });
         const boldBox = await boldButton.boundingBox();
@@ -1360,8 +1376,18 @@ async function profilesAttachmentsAndMoves(page, origin) {
       if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,`approval-${width}.png`)});
     }
     const approvalEditor = page.getByRole('textbox', {name:'Your message'});
+    const approvalPosts = [];
+    const observeApproval = request => {
+      if (request.method() === 'POST' && request.url().endsWith('/turns'))
+        approvalPosts.push(request.postDataJSON());
+    };
+    page.on('request', observeApproval);
     await approvalEditor.pressSequentially('/ap');
-    await page.getByRole('option', {name:'/approve',exact:true}).click();
+    await page.getByRole('option', {name:'/approvals',exact:true}).waitFor();
+    const approveSuggestion = page.getByRole('option', {name:'/approve',exact:true});
+    await approveSuggestion.waitFor();
+    if (process.env.SHOTS) await page.screenshot({path:path.join(process.env.SHOTS,'slash-approval-375.png')});
+    await approveSuggestion.click();
     assert.equal(await editorText(approvalEditor), '/approve');
     assert.equal(await page.getByRole('listbox', {name:'Gateway suggestions'}).count(),0);
     await approvalEditor.pressSequentially(' session');
@@ -1371,6 +1397,8 @@ async function profilesAttachmentsAndMoves(page, origin) {
     assert.equal(approved.text, '/approve session');
     assert(approved.approval, 'the slash draft is pinned to the live approval');
     await page.getByText('Hermes received your decision: session.',{exact:false}).waitFor();
+    page.off('request', observeApproval);
+    assert.deepEqual(approvalPosts, [approved], 'selecting an approval must not submit it');
     assert.equal(await page.locator('article').count(),1);
     for (const width of [1100,375]) {
       await page.setViewportSize({width,height:800});

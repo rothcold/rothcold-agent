@@ -249,7 +249,7 @@ function apiMethod(path, method) {
 		)
 	)
 		return method === "POST";
-	if (/^\/api\/(?:me|sessions|notifications)$/.test(path))
+	if (/^\/api\/(?:me|sessions|notifications|slash-catalog)$/.test(path))
 		return method === "GET";
 	if (
 		/^\/api\/(?:chats|channels|profile|chats\/[A-Za-z0-9_-]+\/turns)$/.test(

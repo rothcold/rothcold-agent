@@ -9,7 +9,7 @@ from zipfile import ZipFile
 
 wheel, plugins = map(Path, sys.argv[1:])
 package = {f'rothcold_agent/{name}' for name in (
-    '__init__.py', 'adapter.py', 'plugin.yaml',
+    '__init__.py', 'adapter.py', 'plugin.yaml', 'slash_catalog.py',
 )}
 metadata = wheel.name.removesuffix('-py3-none-any.whl') + '.dist-info'
 license_file = f'{metadata}/licenses/LICENSE'

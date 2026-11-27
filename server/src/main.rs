@@ -2,6 +2,7 @@ mod approvals;
 mod attachments;
 mod profiles;
 mod sessions;
+mod slash_catalog;
 mod store;
 
 use axum::{
@@ -37,6 +38,7 @@ struct Platform {
     attachments: PathBuf,
     attachment_slots: attachments::TransferSlots,
     profiles: Mutex<profiles::ProfilePolls>,
+    slash_catalog: Mutex<slash_catalog::SlashCatalog>,
     owner: String,
     bridge: String,
 }
@@ -374,6 +376,7 @@ async fn send_turn(
 }
 async fn connect(State(a): State<App>) -> Result<Json<Value>> {
     *lock(&a.approvals) = approvals::Mailbox::default();
+    *lock(&a.slash_catalog) = slash_catalog::SlashCatalog::default();
     store::interrupt(&lock(&a.db))?;
     Ok(Json(json!({})))
 }
@@ -478,6 +481,7 @@ async fn main() -> std::io::Result<()> {
         attachments,
         attachment_slots: Default::default(),
         profiles: Mutex::default(),
+        slash_catalog: Mutex::default(),
         db: Mutex::new(db),
         approvals: Mutex::default(),
         auth: Mutex::new(Auth {
@@ -495,6 +499,7 @@ async fn main() -> std::io::Result<()> {
         .route("/api/sessions", get(sessions::list))
         .route("/api/sessions/{id}/revoke", post(sessions::revoke))
         .route("/api/profile", get(profiles::get).post(profiles::update))
+        .route("/api/slash-catalog", get(slash_catalog::get))
         .route("/api/profile/sync", post(profiles::sync))
         .route("/api/attachments", post(attachments::upload))
         .route("/api/attachments/{id}", get(attachments::view))
@@ -512,6 +517,7 @@ async fn main() -> std::io::Result<()> {
             post(stop_waiting),
         )
         .route("/adapter/connect", post(connect))
+        .route("/adapter/slash-catalog", post(slash_catalog::report))
         .route("/adapter/profile", post(profiles::report))
         .route("/adapter/avatar", post(attachments::upload_backend))
         .route("/adapter/attachments/{id}", get(attachments::adapter_view))

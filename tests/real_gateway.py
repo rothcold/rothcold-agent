@@ -50,6 +50,14 @@ def await_(f, n=45):
     raise TimeoutError(f'Wait timed out: {f.__name__}')
 def login():
     return request('/api/login', {'token':owner})[1]['session']
+
+# Different directory and frontmatter names verify the Gateway's slash slug, not an FS listing.
+for directory, name in [('directory-is-not-a-slug', 'rothcold-smoke-skill'), ('disabled-fixture', 'rothcold-disabled-skill')]:
+    folder = home / 'skills' / directory
+    folder.mkdir(parents=True)
+    (folder / 'SKILL.md').write_text(
+        f'---\nname: {name}\ndescription: Disposable Gateway slash fixture.\n---\n\nSYNTHETIC_SLASH_SKILL_BODY\n')
+
 with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
     fixture=subprocess.Popen([sys.executable, os.environ['ROOT']+'/tests/fixture_model.py'], env=env, stdout=f, stderr=f)
     def start_platform():
@@ -59,6 +67,7 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
     try:
         token=await_(login)
         assert request('/api/status') == (200, {'service':'rothcold-agent', 'apiVersion':1})
+        assert request('/api/slash-catalog', None, token) == (200, {'catalog': None})
         channel=request('/api/channels',{'name':'Work'},token)[1]['id']
         msg={'id':str(uuid.uuid4()),'text':'Please reply with a short greeting.'}
         status, thread=request('/api/chats',dict(msg,channel=channel),token)
@@ -100,7 +109,14 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
         assert request('/api/chats/'+chat+'/read',{},token)[0] == 200
         token=login()
         assert request('/api/notifications',None,token)[1] == [dict(event,unread=0) for event in events]
-        # Verify /sethome slash command works in-band without invoking the model.
+        catalog = await_(lambda: request('/api/slash-catalog', None, token)[1]['catalog'])
+        assert set(catalog) == {'commands', 'skills'}
+        assert 'sethome' in catalog['commands'] and 'quit' not in catalog['commands']
+        assert 'rothcold-smoke-skill' in catalog['skills'], catalog
+        assert 'rothcold-disabled-skill' not in catalog['skills']
+        assert 'directory-is-not-a-slug' not in catalog['skills']
+        assert 'SYNTHETIC_SLASH_SKILL_BODY' not in json.dumps(catalog)
+        # Verify the catalog's /sethome works in-band without invoking the model.
         sethome={'id':str(uuid.uuid4()),'text':'/sethome'}
         assert request(path,sethome,token)[0]==202
         await_(lambda: len(request(path,None,token)[1])==3 and request(path,None,token)[1][2]['state']=='answered')
@@ -126,7 +142,11 @@ with (home/'fixture.log').open('w') as f, (home/'gateway.log').open('w') as g:
         log = (home/'fixture.log').read_text()
         assert log.count('completion requested') == 3, log
         assert log.count('attachment reached model fixture') == 1, log
-        print('Offline restart + real Gateway: two FIFO text turns, /sethome without inference, and one attachment-only turn reached the model and completed.')
+        skill = {'id': str(uuid.uuid4()), 'text': '/rothcold-smoke-skill explicit skill invocation'}
+        assert request(path, skill, token)[0] == 202
+        await_(lambda: len(request(path, None, token)[1]) == 5 and request(path, None, token)[1][4]['state'] == 'answered')
+        assert (home/'fixture.log').read_text().count('slash skill reached model fixture') == 1
+        print('Offline restart + real Gateway: FIFO text, discovered /sethome, one attachment-only turn, and explicit invocation of a discovered synthetic skill passed. CLI-only and platform-disabled entries were absent.')
     finally:
         for p in (gate,platform,fixture):
             if p is not None and p.poll() is None:

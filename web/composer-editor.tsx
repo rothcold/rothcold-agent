@@ -19,6 +19,7 @@ import {
 	type RefObject,
 } from "react";
 import type { EditorView } from "@tiptap/pm/view";
+import { useComposerSlashMenu } from "./composer-slash-menu.tsx";
 import { WorkspaceIcon } from "./workspace-icon.tsx";
 
 export const composerLimit = 8000;
@@ -228,6 +229,8 @@ function useComposerToolbar() {
 type ComposerProps = {
 	id: string;
 	label: string;
+	server: string;
+	canSuggestApproval?: (choice: "once" | "deny") => boolean;
 	placeholder: string;
 	initialMarkdown: string;
 	initialLiteralContent?: JSONContent;
@@ -326,8 +329,11 @@ function useComposerDocument({
 	onMarkdownChange,
 	blocked,
 	hasAttachments,
+	server,
+	canSuggestApproval,
 	ref,
 }: Omit<ComposerProps, "actions">) {
+	const slash = useComposerSlashMenu(id, server, blocked, canSuggestApproval);
 	const [length, setLength] = useState(initialMarkdown.length);
 	const [, setToolbarRevision] = useState(0);
 	const tooLong = length > composerLimit;
@@ -344,9 +350,11 @@ function useComposerDocument({
 			Markdown.configure({ markedOptions: { gfm: true, breaks: true } }),
 			Placeholder.configure({ placeholder, showOnlyWhenEditable: false }),
 		],
-		onTransaction: () => {
+		onTransaction: ({ editor, transaction }) => {
+			slash.onTransaction(editor, transaction);
 			setToolbarRevision((n) => n + 1);
 		},
+		onBlur: slash.close,
 		onUpdate: ({ editor }) => {
 			const markdown = editor.getMarkdown();
 			setLength(markdown.length);
@@ -356,18 +364,23 @@ function useComposerDocument({
 			onMarkdownChange(markdown, snapshot ? editor.getJSON() : undefined);
 		},
 		editorProps: {
-			attributes: composerAttributes(
-				id,
-				label,
-				blocked,
-				tooLong ? errorId : "",
-			),
+			attributes: {
+				...composerAttributes(id, label, blocked, tooLong ? errorId : ""),
+				...slash.editorAttributes,
+			},
 			handleDOMEvents: {
+				compositionstart: slash.startComposition,
+				compositionend: slash.endComposition,
 				// Leave composition Enter to the browser, not the ProseMirror keymap.
 				keydown: (view, event) =>
-					event.key === "Enter" && (event.isComposing || view.composing),
+					event.key === "Enter" &&
+					(event.isComposing ||
+						view.composing ||
+						slash.isComposing() ||
+						event.keyCode === 229),
 			},
 			handleKeyDown: (view, event) =>
+				slash.onKeyDown(editor, event) ||
 				composerEnter(editor, view, event, hasAttachments),
 			handlePaste: (view, event) =>
 				composerPaste(editor?.markdown, view, event, keepLiteralDraft),
@@ -388,7 +401,7 @@ function useComposerDocument({
 		}),
 		[editor],
 	);
-	return { editor, tooLong, errorId };
+	return { editor, tooLong, errorId, slashMenu: slash.render(editor) };
 }
 
 function ComposerToolbar({
@@ -437,11 +450,13 @@ function ComposerToolbar({
 }
 
 export function ComposerEditor({ actions, ...documentProps }: ComposerProps) {
-	const { editor, tooLong, errorId } = useComposerDocument(documentProps);
+	const { editor, tooLong, errorId, slashMenu } =
+		useComposerDocument(documentProps);
 	const toolbar = useComposerToolbar();
 	const toggleLabel = toolbar.open ? "Hide formatting" : "Show formatting";
 	return (
 		<>
+			{slashMenu}
 			{toolbar.open && (
 				<ComposerToolbar
 					editor={editor}

@@ -121,6 +121,7 @@ async fn served_downloads_use_safe_headers_and_hold_transfer_slots_through_body(
         }),
         approvals: Default::default(),
         profiles: Default::default(),
+        slash_catalog: Default::default(),
         attachments: scratch.0.clone(),
         attachment_slots: Default::default(),
         owner: String::new(),

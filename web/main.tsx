@@ -618,6 +618,19 @@ function ReplyComposer({
 			<ComposerEditor
 				id="text"
 				ref={editor}
+				server={server}
+				canSuggestApproval={(choice) => {
+					const approval = drafts.get(chat.id)?.approval;
+					return Boolean(
+						approval &&
+							turns?.some((turn) =>
+								turn.updates.some(
+									(item) =>
+										item.id === approval && item.choices?.includes(choice),
+								),
+							),
+					);
+				}}
 				label="Your message"
 				placeholder="Write a reply…"
 				initialMarkdown={drafts.get(chat.id)?.text ?? ""}
@@ -1525,6 +1538,7 @@ function NewThreadComposer({
 			<ComposerEditor
 				id="first-message"
 				ref={firstMessage}
+				server={server}
 				label={`New thread in ${channel.name}`}
 				placeholder="Write the first message for a new thread…"
 				initialMarkdown={drafts.get(key)?.text ?? ""}

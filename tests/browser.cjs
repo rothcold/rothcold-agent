@@ -392,6 +392,12 @@ async function profilesAttachmentsAndMoves(page, origin) {
     }
     const page = await open(origin,1100);
     await page.getByRole('heading',{name:'General'}).waitFor();
+    if (process.argv.includes('--archive')) {
+      await require('./browser-archive.cjs')(page, origin, assertLayout);
+      assert.deepEqual(outsideOrigins, []);
+      assert.deepEqual(errors, []);
+      return;
+    }
     if (process.argv.includes('--features')) {
       await profilesAttachmentsAndMoves(page, origin);
       assert.deepEqual(outsideOrigins, []);

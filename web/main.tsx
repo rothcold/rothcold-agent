@@ -18,6 +18,11 @@ import {
 } from "./workspace-nav.tsx";
 import { WorkspaceIcon } from "./workspace-icon.tsx";
 import { WorkspaceSearch } from "./workspace-search.tsx";
+import {
+	activeDirectory,
+	ArchivePane,
+	archivedThreadReason,
+} from "./workspace-archive.tsx";
 import { fallbackName, IdentityAvatar, ProfileSettings } from "./profile.tsx";
 import {
 	AttachFiles,
@@ -35,9 +40,11 @@ import {
 	pending,
 	replyDraft,
 	requestFor,
+	type Archived,
 	type Chat,
 	type Channel,
 	type InboxEvent,
+	type WorkspaceDirectory,
 	type Profile,
 	type Draft,
 	type Turn,
@@ -336,12 +343,18 @@ function ThreadTitle({
 	markRead,
 	rename,
 	move,
+	archive,
+	archived,
+	archiveReason,
 	report,
 }: {
 	title: string;
 	channel: Channel;
 	channels: Channel[];
 	move: (channel: string) => Promise<void>;
+	archive: (archived: boolean) => Promise<void>;
+	archived: Archived;
+	archiveReason: string;
 	markRead?: () => void;
 	rename: (title: string) => Promise<void>;
 	report: Report;
@@ -380,6 +393,18 @@ function ThreadTitle({
 					<WorkspaceIcon name="back" />
 				</a>
 				<span className="thread-kicker">Thread</span>
+				<form
+					className="thread-archive"
+					method="post"
+					onSubmit={submit(async () => {
+						await archive(!archived);
+						setDestination(null);
+					})}
+				>
+					<button className="quiet" type="submit" aria-disabled={busy}>
+						{archived ? "Restore thread" : "Archive thread"}
+					</button>
+				</form>
 			</div>
 			<h1 id="thread-heading" tabIndex={-1}>
 				{title}
@@ -402,23 +427,25 @@ function ThreadTitle({
 				>
 					Rename thread
 				</button>
-				<button
-					ref={moveTrigger}
-					className="quiet"
-					type="button"
-					aria-expanded={moving}
-					aria-disabled={busy}
-					onClick={() => {
-						if (busy) return;
-						if (moving) closeMove();
-						else {
-							setDraft(null);
-							setDestination(channel.id);
-						}
-					}}
-				>
-					Move thread
-				</button>
+				{!archiveReason && (
+					<button
+						ref={moveTrigger}
+						className="quiet"
+						type="button"
+						aria-expanded={moving}
+						aria-disabled={busy}
+						onClick={() => {
+							if (busy) return;
+							if (moving) closeMove();
+							else {
+								setDraft(null);
+								setDestination(channel.id);
+							}
+						}}
+					>
+						Move thread
+					</button>
+				)}
 				{markRead && (
 					<button className="quiet" type="button" onClick={markRead}>
 						Mark thread read
@@ -438,7 +465,7 @@ function ThreadTitle({
 					})}
 				/>
 			)}
-			{destination !== null && (
+			{!archiveReason && destination !== null && (
 				<MoveThreadForm
 					destination={destination}
 					current={channel.id}
@@ -465,6 +492,7 @@ type ConversationProps = {
 	attachmentDrafts: AttachmentDrafts;
 	setAttachmentDrafts: SetAttachmentDrafts;
 	move: (channel: string) => Promise<void>;
+	archive: (archived: boolean) => Promise<void>;
 	markRead?: () => void;
 	events: InboxEvent[];
 	alerts: ReturnType<typeof useBrowserAlerts>;
@@ -903,12 +931,14 @@ function Conversation(props: ConversationProps) {
 		channel,
 		channels,
 		move,
+		archive,
 		markRead,
 		rename,
 		report,
 		server,
 		events,
 	} = props;
+	const archiveReason = archivedThreadReason(chat, channel);
 	const path = `chats/${chat.id}/turns`;
 	const { turns, invalidate } = useConversationHistory(
 		path,
@@ -925,6 +955,9 @@ function Conversation(props: ConversationProps) {
 					channel={channel}
 					channels={channels}
 					move={move}
+					archive={archive}
+					archived={chat.archived}
+					archiveReason={archiveReason}
 					markRead={markRead}
 					rename={rename}
 					report={report}
@@ -936,15 +969,21 @@ function Conversation(props: ConversationProps) {
 				workspace={props}
 				actions={threadActions(path, server, report, invalidate)}
 			/>
-			<ReplyComposer
-				{...props}
-				path={path}
-				turns={turns}
-				sent={() => {
-					follow.current = true;
-					invalidate();
-				}}
-			/>
+			{archiveReason ? (
+				<p className="archive-notice" role="status">
+					{archiveReason}
+				</p>
+			) : (
+				<ReplyComposer
+					{...props}
+					path={path}
+					turns={turns}
+					sent={() => {
+						follow.current = true;
+						invalidate();
+					}}
+				/>
+			)}
 		</section>
 	);
 }
@@ -962,73 +1001,76 @@ type WorkspaceProps = {
 };
 
 function useWorkspaceDirectory(server: string, report: Report) {
-	const [channels, setChannels] = useState<Channel[]>([]);
-	const [chats, setChats] = useState<Chat[]>([]);
-	const threadRevision = useRef(0);
+	const [directory, setDirectory] = useState<WorkspaceDirectory>({
+		channels: [],
+		chats: [],
+	});
+	const revision = useRef(0);
 	useEffect(() => {
 		let active = true;
 		let timer: number;
-		async function refreshTitles() {
-			const revision = threadRevision.current;
+		async function refresh() {
+			const started = revision.current;
 			try {
-				const threads = await api<Chat[]>("chats", server);
-				if (active && revision === threadRevision.current) {
-					const titles = new Map(threads.map(({ id, title }) => [id, title]));
-					setChats((list) => {
-						let changed = false;
-						const next = list.map((chat) => {
-							const title = titles.get(chat.id);
-							if (title === undefined || title === chat.title) return chat;
-							changed = true;
-							return { ...chat, title };
-						});
-						return changed ? next : list;
-					});
-				}
-			} catch {
-				// A background title refresh cannot block workspace use.
-			} finally {
-				if (active) timer = window.setTimeout(refreshTitles, 4000);
-			}
-		}
-		async function load() {
-			try {
-				const [groups, threads] = await Promise.all([
-					api<Channel[]>("channels", server),
-					api<Chat[]>("chats", server),
-				]);
-				if (active) {
-					setChannels(groups);
-					setChats(threads);
-					timer = window.setTimeout(refreshTitles, 4000);
-				}
+				const value = await api<WorkspaceDirectory>("directory", server);
+				if (active && revision.current === started) setDirectory(value);
 			} catch (e) {
 				if (active) report(failure(e));
+			} finally {
+				if (active) timer = window.setTimeout(refresh, 4000);
 			}
 		}
-		void load();
+		void refresh();
 		return () => {
 			active = false;
 			clearTimeout(timer);
 		};
 	}, [server, report]);
-	function recordThread(thread: Chat) {
-		threadRevision.current += 1;
-		setChats((list) => [
-			thread,
-			...list.filter((chat) => chat.id !== thread.id),
-		]);
+	function recordThread(thread: Omit<Chat, "archived">) {
+		revision.current += 1;
+		setDirectory((old) => {
+			const existing = old.chats.find((chat) => chat.id === thread.id);
+			return {
+				...old,
+				chats: [
+					{ archived: existing?.archived ?? 0, ...thread },
+					...old.chats.filter((chat) => chat.id !== thread.id),
+				],
+			};
+		});
 	}
-	function recordCategory(channel: Channel) {
-		setChannels((list) => [...list, channel]);
+	function recordCategory(channel: Omit<Channel, "archived">) {
+		revision.current += 1;
+		setDirectory((old) => ({
+			...old,
+			channels: [...old.channels, { ...channel, archived: 0 }],
+		}));
 	}
 	function updateThread(id: string, patch: Partial<Chat>) {
-		threadRevision.current += 1;
-		setChats((list) =>
-			list.map((chat) => (chat.id === id ? { ...chat, ...patch } : chat)),
-		);
+		revision.current += 1;
+		setDirectory((old) => ({
+			...old,
+			chats: old.chats.map((chat) =>
+				chat.id === id ? { ...chat, ...patch } : chat,
+			),
+		}));
 	}
-	return { channels, chats, recordThread, recordCategory, updateThread };
+	function updateCategory(id: string, patch: Partial<Channel>) {
+		revision.current += 1;
+		setDirectory((old) => ({
+			...old,
+			channels: old.channels.map((channel) =>
+				channel.id === id ? { ...channel, ...patch } : channel,
+			),
+		}));
+	}
+	return {
+		...directory,
+		recordThread,
+		recordCategory,
+		updateThread,
+		updateCategory,
+	};
 }
 type Directory = ReturnType<typeof useWorkspaceDirectory>;
 
@@ -1338,8 +1380,9 @@ function workspaceRoute(directory: Directory, selected: string) {
 	const channel = directory.channels.find((item) => item.id === channelId);
 	const inbox = selected === "inbox";
 	const settings = selected === "settings";
-	const threadId = !inbox && !settings ? chat?.id : undefined;
-	return { chat, channel, inbox, settings, threadId };
+	const archive = selected === "archive";
+	const threadId = !inbox && !settings && !archive ? chat?.id : undefined;
+	return { chat, channel, inbox, settings, archive, threadId };
 }
 type WorkspaceRoute = ReturnType<typeof workspaceRoute>;
 
@@ -1354,13 +1397,14 @@ function WorkspaceCommandBar({
 	setSearchOpen: (open: boolean) => void;
 	rememberThreadOpener: (thread: Chat, trigger: HTMLElement) => void;
 }) {
-	const { inbox, settings, channel, chat } = route;
-	const { channels, chats } = directory;
+	const { inbox, settings, archive, channel, chat } = route;
+	const { channels, chats } = activeDirectory(directory);
 	return (
 		<div className="command-bar">
 			<nav className="workspace-path" aria-label="Breadcrumb">
 				{settings && <span aria-current="page">Settings</span>}
 				{inbox && <span aria-current="page">Inbox</span>}
+				{archive && <span aria-current="page">Archived</span>}
 				{channel && !chat && (
 					<span aria-current="page" title={channel.name}>
 						{channel.name}
@@ -1480,7 +1524,12 @@ function InboxPane({
 									{channels.find((c) => c.id === e.channel)?.name} ·{" "}
 									{e.unread ? "Unread" : "Read"}
 								</small>
-								<span>{chats.find((c) => c.id === e.chat)?.title}</span>
+								<span className="inbox-thread-title">
+									{chats.find((c) => c.id === e.chat)?.title ?? e.title}
+								</span>
+								{e.preview && (
+									<span className="inbox-preview">{e.preview}</span>
+								)}
 							</a>
 						</li>
 					))}
@@ -1539,7 +1588,7 @@ function NewThreadComposer({
 				const submittedAt = navigationRevision.current;
 				const draft = requestFor(text, drafts.get(key) ?? null, firstFiles.ids);
 				saveComposerDraft(drafts, key, draft, literalDraft(drafts.get(key)));
-				const thread = await api<Chat>("chats", server, {
+				const thread = await api<Omit<Chat, "archived">>("chats", server, {
 					...draft,
 					channel: channel.id,
 				});
@@ -1595,12 +1644,78 @@ function NewThreadComposer({
 	);
 }
 
+function CategoryMenu({
+	channel,
+	directory,
+	server,
+	report,
+}: {
+	channel: Channel;
+	directory: Directory;
+	server: string;
+	report: Report;
+}) {
+	const { busy, submit } = useSubmit(report);
+	return (
+		<details className="category-menu">
+			<summary>Category actions</summary>
+			<form
+				method="post"
+				onSubmit={submit(async (form) => {
+					const name = String(new FormData(form).get("name") ?? "").trim();
+					const saved = await api<Pick<Channel, "name">>(
+						`channels/${channel.id}/rename`,
+						server,
+						{ name },
+					);
+					directory.updateCategory(channel.id, saved);
+					form.closest("details")?.removeAttribute("open");
+				})}
+			>
+				<label htmlFor="rename-category">Rename category to</label>
+				<input
+					key={channel.name}
+					id="rename-category"
+					name="name"
+					defaultValue={channel.name}
+					maxLength={80}
+					required
+				/>
+				<button type="submit" disabled={busy}>
+					Rename category
+				</button>
+			</form>
+			{channel.id !== "general" && (
+				<form
+					method="post"
+					onSubmit={submit(async (form) => {
+						const saved = await api<Pick<Channel, "archived">>(
+							`channels/${channel.id}/archive`,
+							server,
+							{ archived: !channel.archived },
+						);
+						directory.updateCategory(channel.id, saved);
+						const menu = form.closest("details");
+						menu?.removeAttribute("open");
+						menu?.querySelector("summary")?.focus();
+					})}
+				>
+					<button className="quiet" type="submit" disabled={busy}>
+						{channel.archived ? "Restore category" : "Archive category"}
+					</button>
+				</form>
+			)}
+		</details>
+	);
+}
+
 function CategoryPane({
 	channel,
 	directory,
 	unread,
 	history,
 	focus,
+	menu,
 	compose,
 }: {
 	channel: Channel;
@@ -1608,9 +1723,13 @@ function CategoryPane({
 	unread: Map<string, number>;
 	history: CategoryHistory;
 	focus: ReturnType<typeof useThreadFocus>;
+	menu: ReactNode;
 	compose: ReactNode;
 }) {
-	const threads = directory.chats.filter((chat) => chat.channel === channel.id);
+	const threads = directory.chats.filter(
+		(chat) =>
+			chat.channel === channel.id && (channel.archived || !chat.archived),
+	);
 	const { categoryFeed } = history;
 	const { categoryHeading, rememberThreadOpener } = focus;
 	return (
@@ -1621,12 +1740,15 @@ function CategoryPane({
 						#
 					</span>
 					<div>
-						<p className="eyebrow">Category</p>
+						<p className="eyebrow">
+							{channel.archived ? "Archived category" : "Category"}
+						</p>
 						<h1 ref={categoryHeading} tabIndex={-1}>
 							{channel.name}
 						</h1>
 					</div>
 				</div>
+				{menu}
 			</div>
 			<div
 				className="pane-scroll"
@@ -1637,7 +1759,11 @@ function CategoryPane({
 					Threads <span>{threads.length}</span>
 				</h2>
 				{threads.length === 0 && (
-					<p className="empty">No threads yet. Start one below.</p>
+					<p className="empty">
+						{channel.archived
+							? "No threads in this category."
+							: "No threads yet. Start one below."}
+					</p>
 				)}
 				<ul className="category-threads">
 					{threads.map((c) => {
@@ -1654,7 +1780,16 @@ function CategoryPane({
 										<WorkspaceIcon name="thread" />
 									</span>
 									<span className="thread-row-title">{c.title}</span>
-									{count > 0 && <small className="badge">{count} unread</small>}
+									{(c.archived === 1 || count > 0) && (
+										<span className="thread-row-meta">
+											{c.archived === 1 && (
+												<small className="badge">Archived</small>
+											)}
+											{count > 0 && (
+												<small className="badge">{count} unread</small>
+											)}
+										</span>
+									)}
 									<WorkspaceIcon name="forward" />
 								</a>
 							</li>
@@ -1662,7 +1797,13 @@ function CategoryPane({
 					})}
 				</ul>
 			</div>
-			{compose}
+			{channel.archived ? (
+				<p className="archive-notice" role="status">
+					Restore this category to start a thread.
+				</p>
+			) : (
+				compose
+			)}
 		</section>
 	);
 }
@@ -1704,6 +1845,14 @@ function ThreadPane({
 		directory.updateThread(moved.id, { channel: moved.channel });
 		inbox.moveEvents(moved.id, moved.channel);
 	}
+	async function archive(archived: boolean) {
+		const saved = await api<Pick<Chat, "archived">>(
+			`chats/${chat.id}/archive`,
+			server,
+			{ archived },
+		);
+		directory.updateThread(chat.id, saved);
+	}
 	async function rename(title: string) {
 		const saved = await api<{ title: string }>(
 			`chats/${chat.id}/rename`,
@@ -1720,12 +1869,13 @@ function ThreadPane({
 			onRead={inbox.onRead}
 			chat={chat}
 			channel={channel}
-			channels={directory.channels}
+			channels={directory.channels.filter((item) => !item.archived)}
 			profile={profile}
 			mediaBase={mediaBase}
 			attachmentDrafts={attachmentDrafts}
 			setAttachmentDrafts={setAttachmentDrafts}
 			move={move}
+			archive={archive}
 			markRead={
 				events.some((event) => event.unread)
 					? () => void inbox.markRead(chat.id)
@@ -1782,6 +1932,7 @@ function WorkspacePane({
 		return (
 			<InboxPane directory={directory} events={inbox.events} alerts={alerts} />
 		);
+	if (route.archive) return <ArchivePane {...directory} />;
 	if (route.chat && route.channel)
 		return (
 			<ThreadPane
@@ -1823,6 +1974,7 @@ function Workspace(config: WorkspaceProps) {
 	const firstMessage = useRef<ComposerEditorHandle>(null);
 	const alerts = useBrowserAlerts(report);
 	const directory = useWorkspaceDirectory(server, report);
+	const active = activeDirectory(directory);
 	const history = useCategoryHistory(workspace, report);
 	const route = workspaceRoute(directory, history.selected);
 	const focus = useThreadFocus(
@@ -1845,6 +1997,14 @@ function Workspace(config: WorkspaceProps) {
 			unread={unread}
 			history={history}
 			focus={focus}
+			menu={
+				<CategoryMenu
+					channel={route.channel}
+					directory={directory}
+					server={server}
+					report={report}
+				/>
+			}
 			compose={
 				<NewThreadComposer
 					{...config}
@@ -1874,12 +2034,12 @@ function Workspace(config: WorkspaceProps) {
 			/>
 			<WorkspaceRail
 				selected={history.selected}
-				category={route.channel?.id}
+				category={route.channel?.archived ? undefined : route.channel?.id}
 				total={total}
 			/>
 			<WorkspaceNav
-				channels={directory.channels}
-				chats={directory.chats}
+				channels={active.channels}
+				chats={active.chats}
 				unread={unread}
 				total={total}
 				selected={history.selected}

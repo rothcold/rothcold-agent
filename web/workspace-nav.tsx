@@ -32,7 +32,11 @@ export function WorkspaceRail({
 			</a>
 			<a
 				href={`#channel/${category ?? "general"}`}
-				data-active={selected !== "inbox" && selected !== "settings"}
+				data-active={
+					selected !== "inbox" &&
+					selected !== "settings" &&
+					selected !== "archive"
+				}
 				onClick={close}
 			>
 				<WorkspaceIcon name="workspace" />
@@ -246,6 +250,13 @@ function WorkspaceSidebar(props: SidebarProps) {
 						<CategoryGroup key={channel.id} channel={channel} sidebar={props} />
 					))}
 				</nav>
+				<a
+					className="archive-link quiet"
+					href="#archive"
+					aria-current={selected === "archive" ? "page" : undefined}
+				>
+					Archived
+				</a>
 				{children}
 			</div>
 		</aside>

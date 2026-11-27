@@ -10,10 +10,14 @@ fn new_db() -> store::Result<Connection> {
 fn version_five_keeps_existing_titles_without_backfill() -> store::Result<()> {
     let mut db = new_db()?;
     store::enqueue(&mut db, "old", "old", "Keep me", Some("general"), &[])?;
-    db.execute_batch("DROP TABLE thread_title_jobs; PRAGMA user_version=5;")?;
+    db.execute_batch(
+        "DROP TABLE thread_title_jobs;
+        ALTER TABLE chats DROP COLUMN archived; ALTER TABLE channels DROP COLUMN archived;
+        ALTER TABLE notifications DROP COLUMN preview; PRAGMA user_version=5;",
+    )?;
     store::init(&mut db)?;
     assert_eq!(claim_job(&mut db)?, Value::Null);
-    assert_eq!(store::chats(&db)?[0]["title"], "Keep me");
+    assert_eq!(store::archive::active_chats(&db)?[0]["title"], "Keep me");
     Ok(())
 }
 
@@ -28,7 +32,10 @@ fn title_job_lease_cannot_repeat_or_overwrite_manual_rename() -> store::Result<(
     let mut lease = || -> store::Result<String> {
         let job = claim_job(&mut db)?;
         assert_eq!(job["text"], "Original opener");
-        Ok(job["claim"].as_str().unwrap().to_owned())
+        Ok(job["claim"]
+            .as_str()
+            .ok_or(store::Error::Missing)?
+            .to_owned())
     };
     let (success, expired, manual, failure) = (lease()?, lease()?, lease()?, lease()?);
     db.execute(
@@ -42,7 +49,10 @@ fn title_job_lease_cannot_repeat_or_overwrite_manual_rename() -> store::Result<(
     finish_job(&mut db, &manual, Some("Owner did not choose this"))?;
     finish_job(&mut db, &failure, None)?;
     assert_eq!(claim_job(&mut db)?, Value::Null);
-    for chat in store::chats(&db)?.as_array().unwrap() {
+    for chat in store::archive::active_chats(&db)?
+        .as_array()
+        .ok_or(store::Error::Missing)?
+    {
         let expected = if chat["id"] == "success" {
             "Semantic title"
         } else {
@@ -50,6 +60,6 @@ fn title_job_lease_cannot_repeat_or_overwrite_manual_rename() -> store::Result<(
         };
         assert_eq!(chat["title"], expected);
     }
-    assert_eq!(store::notifications(&db)?, json!([]));
+    assert_eq!(store::inbox::notifications(&db)?, json!([]));
     Ok(())
 }

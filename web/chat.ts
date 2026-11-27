@@ -1,10 +1,19 @@
-export type Chat = { id: string; title: string; channel: string };
-export type Channel = { id: string; name: string };
+export type Archived = 0 | 1;
+export type Chat = {
+	id: string;
+	title: string;
+	channel: string;
+	archived: Archived;
+};
+export type Channel = { id: string; name: string; archived: Archived };
+export type WorkspaceDirectory = { chats: Chat[]; channels: Channel[] };
 export type InboxEvent = {
 	request: string;
 	chat: string;
 	channel: string;
 	unread: 0 | 1;
+	title: string;
+	preview: string;
 };
 export type Attachment = {
 	id: string;

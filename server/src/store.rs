@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+pub(crate) mod archive;
+pub(crate) mod inbox;
 #[cfg(test)]
 mod tests;
 
@@ -59,7 +61,7 @@ pub fn init(db: &mut Connection) -> Result<()> {
         0 | 1 => {
             tx.execute(INTERRUPT, [])?;
         }
-        2..=6 => (),
+        2..=7 => (),
         _ => return Err(Error::Conflict("Unsupported history database version")),
     }
     if version < 3 {
@@ -84,6 +86,10 @@ pub fn init(db: &mut Connection) -> Result<()> {
     if version < 6 {
         super::thread_titles::migrate(&tx)?;
         tx.pragma_update(None, "user_version", 6)?;
+    }
+    if version < 7 {
+        archive::migrate(&tx)?;
+        tx.pragma_update(None, "user_version", 7)?;
     }
     // Old clients queued slash replies without the prompt ID. Never deliver those after an upgrade.
     for row in rows(&tx, "SELECT id,text FROM turns WHERE state='queued'", [])? {
@@ -222,7 +228,7 @@ pub fn push(db: &mut Connection, chat: &str, id: &str, text: &str) -> Result<()>
         "INSERT INTO turns VALUES(?,?,'','answered',?)",
         params![id, chat, text],
     )?;
-    tx.execute("INSERT INTO notifications(request) VALUES (?)", [id])?;
+    inbox::record(&tx, id, text)?;
     tx.commit()?;
     Ok(())
 }
@@ -241,16 +247,13 @@ pub fn finish(db: &mut Connection, chat: &str, id: &str, text: &str) -> Result<(
                 "UPDATE turns SET answer=?,state=CASE WHEN state='released' THEN 'released' ELSE 'answered' END WHERE id=?",
                 [text, id],
             )?;
-            tx.execute("INSERT INTO notifications(request) VALUES (?)", [id])?;
+            inbox::record(&tx, id, text)?;
         }
         Some(Some(old)) if old == text => (),
         _ => return Err(Error::Conflict("Unmatched final")),
     }
     tx.commit()?;
     Ok(())
-}
-pub fn chats(db: &Connection) -> Result<Value> {
-    Ok(rows(db,"SELECT id,title,channel FROM chats JOIN placement ON placement.chat=chats.id ORDER BY chats.rowid DESC",[])?.into())
 }
 pub fn rename(db: &mut Connection, chat: &str, title: &str) -> Result<()> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -262,13 +265,12 @@ pub fn rename(db: &mut Connection, chat: &str, title: &str) -> Result<()> {
     Ok(())
 }
 pub fn move_thread(db: &Connection, chat: &str, channel: &str) -> Result<()> {
-    if db.execute("UPDATE placement SET channel=? WHERE chat=? AND EXISTS (SELECT 1 FROM channels WHERE id=?)", [channel, chat, channel])? == 0 {
+    if db.execute("UPDATE placement SET channel=? WHERE chat=? AND EXISTS (SELECT 1 FROM chats WHERE id=chat AND archived=0) AND EXISTS (SELECT 1 FROM channels WHERE id=placement.channel AND archived=0) AND EXISTS (SELECT 1 FROM channels WHERE id=? AND archived=0)", [channel, chat, channel])? == 0 {
+        archive::require_active_thread(db, chat)?;
+        archive::require_active_category(db, channel)?;
         return Err(Error::Missing);
     }
     Ok(())
-}
-pub fn channels(db: &Connection) -> Result<Value> {
-    Ok(rows(db, "SELECT id,name FROM channels ORDER BY rowid", [])?.into())
 }
 pub fn category(db: &mut Connection, name: &str) -> Result<Value> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -277,7 +279,7 @@ pub fn category(db: &mut Connection, name: &str) -> Result<Value> {
     }
     let id = Uuid::new_v4().to_string();
     if tx.execute(
-        "INSERT INTO channels VALUES(?,?) ON CONFLICT(name) DO NOTHING",
+        "INSERT INTO channels(id,name) VALUES(?,?) ON CONFLICT(name) DO NOTHING",
         [&id, name],
     )? == 0
     {
@@ -285,9 +287,6 @@ pub fn category(db: &mut Connection, name: &str) -> Result<Value> {
     }
     tx.commit()?;
     Ok(json!({"id":id}))
-}
-pub fn notifications(db: &Connection) -> Result<Value> {
-    Ok(rows(db,"SELECT request,turns.chat,placement.channel,unread FROM notifications JOIN turns ON turns.id=request JOIN placement ON placement.chat=turns.chat ORDER BY notifications.rowid DESC",[])?.into())
 }
 fn title(db: &Connection, chat: &str) -> Result<String> {
     db.query_row("SELECT title FROM chats WHERE id=?", [chat], |r| r.get(0))
@@ -393,9 +392,7 @@ pub fn enqueue(
             if count(&tx, "SELECT count(*) FROM chats", [])? >= 128 {
                 return Err(Error::Conflict("Chat limit reached"));
             }
-            if count(&tx, "SELECT count(*) FROM channels WHERE id=?", [cat])? == 0 {
-                return Err(Error::Missing);
-            }
+            archive::require_active_category(&tx, cat)?;
             let first_filename = if text.trim().is_empty() {
                 tx.query_row("SELECT filename FROM attachments WHERE id=? AND purpose='turn' AND turn IS NULL",
                     [attachments.first().ok_or(Error::Conflict("Expected a message or attachment"))?], |r| r.get::<_, String>(0))
@@ -415,13 +412,20 @@ pub fn enqueue(
                 .chars()
                 .take(80)
                 .collect();
-            tx.execute("INSERT INTO chats VALUES(?,?)", [chat, label.trim_end()])?;
+            tx.execute(
+                "INSERT INTO chats(id,title) VALUES(?,?)",
+                [chat, label.trim_end()],
+            )?;
             tx.execute(
                 "INSERT INTO placement(chat,channel,original_channel) VALUES(?,?,?)",
                 [chat, cat, cat],
             )?;
-        } else if count(&tx, "SELECT count(*) FROM turns WHERE chat=?", [chat])? >= 128 {
-            return Err(Error::Conflict("Chat is full. Start a new chat."));
+        } else {
+            // Existing request IDs were checked above, independently of archive state.
+            archive::require_active_thread(&tx, chat)?;
+            if count(&tx, "SELECT count(*) FROM turns WHERE chat=?", [chat])? >= 128 {
+                return Err(Error::Conflict("Chat is full. Start a new chat."));
+            }
         }
         tx.execute(
             "INSERT INTO turns VALUES(?,?,?,'queued',NULL)",

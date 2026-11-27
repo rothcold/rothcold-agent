@@ -8,18 +8,20 @@
 
 | 项目 | 工作分支 | 状态 | 功能提交 / 合并提交 | 验收证据或待办 |
 | :--- | :------- | :--- | :------------------ | :------------- |
-| A1 Category 改名与归档 | `feature/030-archive-inbox` | 已派工 | 待提交 | 见 A1 |
-| A2 Thread 归档 | `feature/030-archive-inbox` | 已派工 | 待提交 | 见 A2 |
-| A3 Inbox 摘要 | `feature/030-archive-inbox` | 已派工 | 待提交 | 见 A3 |
-| B 外观三态 | `feature/030-themes` | 已派工 | 待提交 | 见 B |
-| C 自动标题 | `feature/030-thread-titles` | 已派工 | 待提交 | 见 C |
-| D 命令与 Skills 提示 | `feature/030-slash-menu` | 已派工 | 待提交 | 见 D |
+| A1 Category 改名与归档 | `feature/030-archive-inbox` | 分支复测中 | `8477d20` / 未合并 | 矮屏回归，见交接记录 |
+| A2 Thread 归档 | `feature/030-archive-inbox` | 分支复测中 | `8477d20` / 未合并 | 矮屏回归，见交接记录 |
+| A3 Inbox 摘要 | `feature/030-archive-inbox` | 分支复测中 | `8477d20` / 未合并 | 与 A1、A2 同一分支 |
+| B 外观三态 | `feature/030-themes` | 验收通过、已合并 | `b23934d` / `01398a9` | 隔离 `SCREENSHOTS=1 script/test`（27 系统、19 Rust、6 web）和 `script/test-gateway` 通过。主 agent 审阅首屏、三态和对比度断言，实看 `.screenshots/theme-{light,dark}-settings-{1100,375}.png` 及审批、抽屉截图。 |
+| C 自动标题 | `feature/030-thread-titles` | 主 agent 验收中 | `e433243` / 未合并 | 见 C |
+| D 命令与 Skills 提示 | `feature/030-slash-menu` | 分支复测中 | `80feee7` / 未合并 | 审批用例选中项不符，见交接记录 |
 | 集成回归 | `integration/0.3.0` | 待集成 | 待合并 | 见发布前检查 |
 
 ## 交接记录
 
 - 四个 worktree 位于仓库同级的 `../rothcold-agent-v0.3.0/{archive-inbox,themes,thread-titles,slash-menu}`，共同起点是计划提交 `c2347cf`。`git worktree list` 可核对本地分支与目录。
 - Pi 并行任务 `32bb8fde-61e5-4ef3-ad2e-b5b4c267faed`。续接时先检查该 workflow 及四个 child 的状态，再对照各分支的 `git log` 和工作区差异；不要重复派工。
+
+- A、D 的首轮任务超时，但代码均已提交。A 在 360px 高窗口的对话区仅余 66.8px；D 的补全断言预期 `/approve`，实际选中 `/approvals`。已交原开发者复测：A `44d45c8d-2e95-4e2f-8fd7-d4c8be0aea14`，D `38dc2de9-3888-4597-b2ec-d132f2dfd974`。结果未出前不得合并。
 
 ## A：整理工作区与 Inbox
 

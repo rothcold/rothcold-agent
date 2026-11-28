@@ -1,6 +1,7 @@
 # Noise integration guides
 
 - [Wire, security boundaries, and server startup](noise-client-contract.md)
+- [Planned: newest-first history, session caches and Mac handoff](thread-history-plan.md)
 - [Web wiring and disposable Chromium checks](noise-web.md)
 - [iPhone wiring, host and disposable simulator checks](noise-ios.md)
 - [Release acceptance plan](ios-first-plan.md), [transport decision](adr/0002-noise-client-transport.md), and [historical HTTPS M0](ios-m0-runbook.md)

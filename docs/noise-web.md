@@ -13,6 +13,8 @@ script/pnpm build
 
 `web/noise-codec` is a thin browser ABI over the same locked Rust/Snow v1 codec as the server. The pinned Binaryen `wasm2js` build translates it to ordinary static JavaScript: there is no browser WASM compilation, code generation, remote loader, or CSP exception. Web Crypto supplies secure Noise randomness (no fallback) and signs fresh P-256 device proofs. Stage `web/server.mjs`, `web/default-web-config.json` and `web/dist/` including the combined notices; no Cargo/pnpm/Node modules are used at runtime.
 
+The Rust browser listener enables `TCP_NODELAY` on its accepted loopback sockets. Each Noise result can contain several small records; do not let TCP hold later records while the browser waits for the reply. This changes neither the wire format nor the responder pin. [Newest-first history and caching](thread-history-plan.md) are a separate proposal, not part of this socket change.
+
 ## Configure a trusted origin
 
 1. Use an operator-controlled, cookie-free private HTTPS site with a browser-trusted matching certificate and private ingress controls. Route the static site, and **only** exact configured WS upgrade paths, to the loopback Web process. Preserve the public Host and the browser's unmodified Origin. Do not route `/adapter/*` or any other internal listener. Do not issue cookies; a pre-cutover session is neither accepted nor transferred. On a dedicated previously used origin remove the old Web cookies before connecting or use a new dedicated origin.

@@ -14,6 +14,7 @@ use axum::{
     http::{HeaderMap, Uri, header, uri::Authority},
     response::{IntoResponse, Response},
     routing::get,
+    serve::ListenerExt,
 };
 use rothcold_noise_protocol::{
     Key, TransportState,
@@ -184,7 +185,12 @@ impl Service {
         config: BrowserConfig,
     ) -> io::Result<()> {
         axum::serve(
-            listener,
+            listener.tap_io(|stream| {
+                // Noise results use consecutive small records on this proxy hop.
+                if let Err(error) = stream.set_nodelay(true) {
+                    eprintln!("Could not set TCP_NODELAY on browser Noise socket: {error}");
+                }
+            }),
             Router::new()
                 .route("/noise", get(upgrade))
                 .with_state(Arc::new(Browser {

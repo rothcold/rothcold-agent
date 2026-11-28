@@ -2,6 +2,8 @@
 
 状态：当前 Web 与 iPhone 代码已接入 [Noise v1](noise-client-contract.md)，分别见 [Web 运行手册](noise-web.md)和 [iPhone 运行手册](noise-ios.md)。M0 的私网 HTTPS 和 `/api/*` 只适用于迁移前快照，已不兼容当前服务器。[历史 M0 手册](ios-m0-runbook.md)只记录旧路径。实现与单项测试不等于发布；隔离 Linux 回归及物理 iPhone 检查单独记录。
 
+下一阶段的 [Thread 历史分页与缓存计划](thread-history-plan.md) 先由服务端和 Web 验收，再交给 Mac 端接入。目前 iOS 继续使用现有 v1 历史接口。
+
 先交付一个能在 iPhone 上从私网登录、发消息并收到回复的客户端，再补齐 Web 的审批、收件箱、附件与管理功能。交付的是相同的消息语义，不是桌面界面的缩小版。Android 在此期间继续用响应式 Web。
 
 本计划沿用 [ADR 0001](adr/0001-mobile-native-stack.md) 的 Swift + SwiftUI 和先 iOS 后 Android 路线。每做通一条 iOS 路径，就把其中已验证、与操作系统无关的规则放入 Rust，不等 Android 开工，也不先做一套 SDK。客户端业务传输以已接受的 [ADR 0002](adr/0002-noise-client-transport.md) 为准：iOS 原生直连 Noise，Web 通过二进制 WebSocket 记录连接 Noise；当前不保留客户端业务 HTTP、HTTP-in-Noise 或回退。

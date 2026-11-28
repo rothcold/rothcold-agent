@@ -1,0 +1,290 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		101000000000000000000001 /* RothcoldApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000001 /* RothcoldApp.swift */; };
+		101000000000000000000002 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000002 /* Workspace.swift */; };
+		101000000000000000000003 /* NativeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000003 /* NativeAPI.swift */; };
+		101000000000000000000004 /* SessionKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000004 /* SessionKeychain.swift */; };
+		101000000000000000000005 /* rothcold_mobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000005 /* rothcold_mobile.swift */; };
+		101000000000000000000008 /* NoiseSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000008 /* NoiseSocket.swift */; };
+		101000000000000000000009 /* NoiseMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000009 /* NoiseMessages.swift */; };
+		101000000000000000000010 /* NoiseFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000010 /* NoiseFiles.swift */; };
+		101000000000000000000011 /* DirectoryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000011 /* DirectoryViews.swift */; };
+		101000000000000000000012 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000012 /* ConversationView.swift */; };
+		101000000000000000000013 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000013 /* SettingsView.swift */; };
+		101000000000000000000014 /* FilePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000014 /* FilePreview.swift */; };
+		101000000000000000000015 /* ios-workspace-ui.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102000000000000000000015 /* ios-workspace-ui.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		109000000000000000000001 = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 106000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 105000000000000000000001;
+			remoteInfo = Rothcold;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		102000000000000000000001 /* RothcoldApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RothcoldApp.swift; sourceTree = "<group>"; };
+		102000000000000000000002 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
+		102000000000000000000003 /* NativeAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAPI.swift; sourceTree = "<group>"; };
+		102000000000000000000004 /* SessionKeychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionKeychain.swift; sourceTree = "<group>"; };
+		102000000000000000000005 /* rothcold_mobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rothcold_mobile.swift; sourceTree = "<group>"; };
+		102000000000000000000006 /* Rothcold.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Rothcold.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		102000000000000000000007 /* App.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = App.xcconfig; sourceTree = "<group>"; };
+		102000000000000000000008 /* NoiseSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoiseSocket.swift; sourceTree = "<group>"; };
+		102000000000000000000009 /* NoiseMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoiseMessages.swift; sourceTree = "<group>"; };
+		102000000000000000000010 /* NoiseFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoiseFiles.swift; sourceTree = "<group>"; };
+		102000000000000000000011 /* DirectoryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectoryViews.swift; sourceTree = "<group>"; };
+		102000000000000000000012 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		102000000000000000000013 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		102000000000000000000014 /* FilePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreview.swift; sourceTree = "<group>"; };
+		102000000000000000000015 /* ios-workspace-ui.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../tests/ios-workspace-ui.swift; sourceTree = SOURCE_ROOT; };
+		102000000000000000000016 /* RothcoldUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = RothcoldUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		103000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				103000000000000000000002 /* App */,
+				103000000000000000000003 /* Generated */,
+				102000000000000000000007 /* App.xcconfig */,
+				102000000000000000000015 /* ios-workspace-ui.swift */,
+				103000000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		103000000000000000000002 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				102000000000000000000001 /* RothcoldApp.swift */,
+				102000000000000000000002 /* Workspace.swift */,
+				102000000000000000000003 /* NativeAPI.swift */,
+				102000000000000000000004 /* SessionKeychain.swift */,
+				102000000000000000000008 /* NoiseSocket.swift */,
+				102000000000000000000009 /* NoiseMessages.swift */,
+				102000000000000000000010 /* NoiseFiles.swift */,
+				102000000000000000000011 /* DirectoryViews.swift */,
+				102000000000000000000012 /* ConversationView.swift */,
+				102000000000000000000013 /* SettingsView.swift */,
+				102000000000000000000014 /* FilePreview.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		103000000000000000000003 /* Generated */ = {
+			isa = PBXGroup;
+			children = (
+				102000000000000000000005 /* rothcold_mobile.swift */,
+			);
+			path = Generated;
+			sourceTree = "<group>";
+		};
+		103000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				102000000000000000000016 /* RothcoldUITests.xctest */,
+				102000000000000000000006 /* Rothcold.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		105000000000000000000001 /* Rothcold */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 108000000000000000000002 /* Build configuration list for PBXNativeTarget "Rothcold" */;
+			buildPhases = (
+				104000000000000000000001 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Rothcold;
+			productName = Rothcold;
+			productReference = 102000000000000000000006 /* Rothcold.app */;
+			productType = "com.apple.product-type.application";
+		};
+		105000000000000000000002 /* RothcoldUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 108000000000000000000003;
+			buildPhases = (104000000000000000000002 /* Sources */,);
+			buildRules = ();
+			dependencies = (109000000000000000000002,);
+			name = RothcoldUITests;
+			productName = RothcoldUITests;
+			productReference = 102000000000000000000016 /* RothcoldUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		106000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 2720;
+			};
+			buildConfigurationList = 108000000000000000000001 /* Build configuration list for PBXProject "Rothcold" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 103000000000000000000001;
+			productRefGroup = 103000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				105000000000000000000002 /* RothcoldUITests */,
+				105000000000000000000001 /* Rothcold */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		104000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				101000000000000000000001 /* RothcoldApp.swift in Sources */,
+				101000000000000000000002 /* Workspace.swift in Sources */,
+				101000000000000000000003 /* NativeAPI.swift in Sources */,
+				101000000000000000000004 /* SessionKeychain.swift in Sources */,
+				101000000000000000000005 /* rothcold_mobile.swift in Sources */,
+				101000000000000000000008 /* NoiseSocket.swift in Sources */,
+				101000000000000000000009 /* NoiseMessages.swift in Sources */,
+				101000000000000000000010 /* NoiseFiles.swift in Sources */,
+				101000000000000000000011 /* DirectoryViews.swift in Sources */,
+				101000000000000000000012 /* ConversationView.swift in Sources */,
+				101000000000000000000013 /* SettingsView.swift in Sources */,
+				101000000000000000000014 /* FilePreview.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		104000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (101000000000000000000015 /* ios-workspace-ui.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		109000000000000000000002 = {
+			isa = PBXTargetDependency;
+			target = 105000000000000000000001 /* Rothcold */;
+			targetProxy = 109000000000000000000001;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		107000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		107000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		107000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 102000000000000000000007 /* App.xcconfig */;
+			buildSettings = {
+				DEVELOPMENT_TEAM = 9Z9ZBKJ5Z8;
+			};
+			name = Debug;
+		};
+		107000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 102000000000000000000007 /* App.xcconfig */;
+			buildSettings = {
+				DEVELOPMENT_TEAM = 9Z9ZBKJ5Z8;
+			};
+			name = Release;
+		};
+		107000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.rothcold.agent.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Rothcold;
+			};
+			name = Debug;
+		};
+		107000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.rothcold.agent.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Rothcold;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		108000000000000000000001 /* Build configuration list for PBXProject "Rothcold" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				107000000000000000000001 /* Debug */,
+				107000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		108000000000000000000002 /* Build configuration list for PBXNativeTarget "Rothcold" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				107000000000000000000003 /* Debug */,
+				107000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		108000000000000000000003 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				107000000000000000000005 /* Debug */,
+				107000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 106000000000000000000001 /* Project object */;
+}

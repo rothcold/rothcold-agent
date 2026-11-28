@@ -1,0 +1,20 @@
+#!/bin/sh
+# Prepare Swift bindings and static libraries for local Apple silicon development.
+set -eu
+case "${1-}" in
+    ''|--host-only) ;;
+    *) echo 'Usage: script/ios-core [--host-only]' >&2; exit 2 ;;
+esac
+cd "$(dirname "$0")/../mobile/core"
+export PATH="$(dirname "$(rustup which cargo)"):$PATH"
+export CARGO_TARGET_DIR="$PWD/target"
+export IPHONEOS_DEPLOYMENT_TARGET=26.0
+out="$PWD/../ios/Generated"
+mkdir -p "$out"
+cargo build --locked --lib
+cargo run --locked --features bindgen --bin mobile-bindgen -- generate \
+    --language swift --no-format --out-dir "$out" target/debug/librothcold_mobile.dylib
+[ "${1-}" != --host-only ] || exit 0
+for target in aarch64-apple-ios aarch64-apple-ios-sim; do
+    cargo rustc --locked --lib --release --target "$target" --crate-type staticlib
+done

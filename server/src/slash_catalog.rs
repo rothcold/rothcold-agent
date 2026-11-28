@@ -49,18 +49,13 @@ impl SlashCatalog {
         Ok(())
     }
 
-    fn response(&self, now: Instant) -> Value {
+    pub fn response(&self, now: Instant) -> Value {
         let catalog = self
             .0
             .as_ref()
             .filter(|(at, _)| now.duration_since(*at) < TTL);
         json!({"catalog": catalog.map(|(_, value)| value)})
     }
-}
-
-pub async fn get(State(app): State<App>) -> Json<Value> {
-    let catalog = lock(&app.slash_catalog);
-    Json(catalog.response(Instant::now()))
 }
 
 pub async fn report(State(app): State<App>, Extension(input): Input) -> Result<Json<Value>> {

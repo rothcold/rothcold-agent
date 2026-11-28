@@ -11,6 +11,8 @@ scratch=$(mktemp -d /tmp/hermes-rothcold-agent-gateway.XXXXXXXX)
 trap 'rm -rf -- "$scratch"' EXIT
 mkdir -m 700 "$scratch/home" "$scratch/profile" "$scratch/run" "$scratch/tmp"
 script/build
+cargo build --locked --manifest-path server/Cargo.toml --target-dir server/target --release --example noise-fixture
+install -m755 server/target/release/examples/noise-fixture "$scratch/noise-fixture"
 "$core/venv/bin/python" -B -I -S script/stage-wheel.py dist/*.whl "$scratch/profile/plugins"
 install -m755 dist/rothcold-agent "$scratch/rothcold-agent"
 cat > "$scratch/profile/config.yaml" <<'YAML'

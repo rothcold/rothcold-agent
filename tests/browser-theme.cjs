@@ -77,7 +77,7 @@ async function themeScreens(page, surface, checks) {
   }
 }
 
-async function checkAppearanceSettings(page, origin) {
+async function checkAppearanceSettings(page, origin, connect = gate => gate.getByRole('button',{name:'Connect',exact:true}).click()) {
   const select = page.getByLabel('Theme', {exact:true});
   await select.waitFor();
   assert.equal(await select.inputValue(), 'system');
@@ -110,7 +110,7 @@ async function checkAppearanceSettings(page, origin) {
     const gate = await anonymous.newPage();
     await anonymous.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await assertThemeFirstPaint(gate, options => gate.goto(origin, options), 'light', 'light');
-    await gate.getByRole('button',{name:'Connect',exact:true}).click();
+    await connect(gate);
     await gate.getByLabel('Owner token').waitFor();
     await assertTheme(gate, 'light', 'light');
     await gate.evaluate(() => localStorage.removeItem('rothcold-theme'));

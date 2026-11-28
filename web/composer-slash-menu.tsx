@@ -2,10 +2,10 @@ import type { Editor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { api } from "./chat.ts";
+import type { WorkspaceClient } from "./noise-workspace.ts";
 
 type SlashCatalog = { commands: string[]; skills: string[] };
-type CatalogState = { server: string; catalog: SlashCatalog | null };
+type CatalogState = { server: WorkspaceClient; catalog: SlashCatalog | null };
 const groups = [
 	{ key: "commands", label: "Commands" },
 	{ key: "skills", label: "Skills" },
@@ -45,7 +45,7 @@ function catalogNames(value: unknown, limit: number): value is string[] {
 	);
 }
 
-function useSlashCatalog(server: string, open: boolean) {
+function useSlashCatalog(server: WorkspaceClient, open: boolean) {
 	const [value, setValue] = useState<CatalogState | null>(null);
 	useLayoutEffect(() => {
 		setValue(null);
@@ -53,10 +53,7 @@ function useSlashCatalog(server: string, open: boolean) {
 		let current = true;
 		let timer: ReturnType<typeof setTimeout>;
 		async function refresh() {
-			const response = await api<{ catalog?: SlashCatalog | null }>(
-				"slash-catalog",
-				server,
-			).catch(() => null);
+			const response = await server.call("slash_catalog", {}).catch(() => null);
 			const data = response?.catalog;
 			if (!current) return;
 			const catalog =
@@ -107,7 +104,7 @@ function slashMatches(
 
 export function useComposerSlashMenu(
 	id: string,
-	server: string,
+	server: WorkspaceClient,
 	blocked: boolean,
 	canSuggestApproval?: ApprovalSuggestion,
 ) {

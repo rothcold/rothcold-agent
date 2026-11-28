@@ -1,3 +1,4 @@
+import type { WorkspaceClient } from "./noise-workspace.ts";
 import type { Editor, JSONContent } from "@tiptap/core";
 import { Placeholder } from "@tiptap/extensions";
 import { Markdown, type MarkdownManager } from "@tiptap/markdown";
@@ -229,7 +230,7 @@ function useComposerToolbar() {
 type ComposerProps = {
 	id: string;
 	label: string;
-	server: string;
+	server: WorkspaceClient;
 	canSuggestApproval?: (choice: "once" | "deny") => boolean;
 	placeholder: string;
 	initialMarkdown: string;

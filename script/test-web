@@ -1,0 +1,29 @@
+#!/bin/sh
+# Standalone browser Noise smoke; never starts a real adapter or external services.
+set -eu
+cd "$(dirname "$0")/.."
+root=$(pwd)
+: "${PLAYWRIGHT_DIR:?Set PLAYWRIGHT_DIR to the local Playwright package path}"
+script/pnpm install --frozen-lockfile --ignore-scripts
+script/pnpm format:check
+script/pnpm lint
+script/pnpm typecheck
+script/pnpm test
+script/pnpm test:noise-codec
+script/pnpm build
+cargo fmt --check --manifest-path web/noise-codec/Cargo.toml
+RUSTFLAGS='--cfg getrandom_backend="custom"' cargo clippy --locked --manifest-path web/noise-codec/Cargo.toml \
+  --target wasm32-unknown-unknown --target-dir "$root/.tools/web-codec" -- -D warnings
+cargo test --locked --manifest-path server/Cargo.toml -p rothcold-noise-protocol cacophony
+cargo build --locked --manifest-path server/Cargo.toml --bin rothcold-agent --example noise-fixture
+if [ "${SCREENSHOTS:-0}" = 1 ]; then
+  export SHOTS="$root/.screenshots/web-noise"
+fi
+node tests/browser-noise.cjs
+node tests/browser-switch.cjs
+if [ "$(uname -s)" = Linux ]; then
+  command -v bwrap >/dev/null || { echo 'Parallel Linux workspace coverage requires bwrap' >&2; exit 1; }
+  node tests/browser-switch.cjs --parallel-linux
+else
+  echo 'Parallel workspace regression requires Linux network namespaces (serial A/B passed above).'
+fi

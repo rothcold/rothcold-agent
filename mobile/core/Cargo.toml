@@ -1,0 +1,23 @@
+[package]
+name = "rothcold-mobile"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "mobile-bindgen"
+path = "src/bin/bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+rothcold-noise-protocol = { path = "../../server/noise-protocol" }
+serde_json = "1"
+thiserror = "2"
+uniffi = "=0.33.0"

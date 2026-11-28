@@ -1,0 +1,10 @@
+#!/bin/sh
+# Build unsigned Apple silicon device and simulator apps; no runtime required.
+set -eu
+cd "$(dirname "$0")/.."
+script/ios-core
+for platform in iOS 'iOS Simulator'; do
+    xcodebuild -project mobile/ios/Rothcold.xcodeproj -scheme Rothcold -configuration Debug \
+        -destination "generic/platform=$platform" -derivedDataPath mobile/core/target/xcode \
+        CODE_SIGNING_ALLOWED=NO build
+done

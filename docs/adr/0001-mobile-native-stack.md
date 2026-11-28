@@ -1,6 +1,6 @@
 # ADR 0001: 移动端采用先 iOS 原生、后补 Android 原生的技术选型
 
-- 状态：已选定 (调研结论，尚未开工实现)
+- 状态：历史决策。先 iOS 原生、后 Android 原生及界面技术栈仍有效；以下 HTTP 传输描述仅保留为历史记录，长期目标由 [ADR 0002](0002-noise-client-transport.md) 取代。
 - 日期：2026-11-27
 - 适用范围：`rothcold-agent` 移动端规划 (iOS、Android)
 

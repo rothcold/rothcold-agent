@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
-import { api, type Identity, type Profile, upload } from "./chat.ts";
+import type { Identity, Profile } from "./chat.ts";
+import type { WorkspaceClient } from "./noise-workspace.ts";
+import { useMedia } from "./noise-media.ts";
 import { WorkspaceIcon } from "./workspace-icon.tsx";
 
 type Role = "owner" | "agent";
@@ -13,9 +15,9 @@ export function IdentityAvatar({
 }: {
 	identity: Role;
 	id?: string | null;
-	base: string;
+	base: WorkspaceClient;
 }) {
-	const src = id ? `${base}/attachments/${id}` : "";
+	const src = useMedia(base, id, "image");
 	const [failed, setFailed] = useState("");
 	const owner = identity === "owner";
 	const icon = owner ? "owner" : "hermes";
@@ -30,15 +32,6 @@ export function IdentityAvatar({
 	);
 }
 
-type SyncResult = Profile & {
-	sync: {
-		backend: string;
-		refresh: "refreshed" | "offline" | "timed_out";
-		name: boolean;
-		avatar: boolean;
-	};
-};
-
 function ProfileIdentity({
 	identity,
 	role,
@@ -48,7 +41,7 @@ function ProfileIdentity({
 }: {
 	identity: Identity;
 	role: Role;
-	base: string;
+	base: WorkspaceClient;
 	busy: boolean;
 	save: (value: Partial<Identity> | File) => void;
 }) {
@@ -119,22 +112,6 @@ function ProfileIdentity({
 		</div>
 	);
 }
-async function saveIdentity(
-	server: string,
-	role: Role,
-	value: Partial<Identity> | File,
-) {
-	let patch: Partial<Identity>;
-	if (value instanceof File) {
-		if (value.size > 5 * 1024 * 1024)
-			throw new Error("Avatars can be up to 5 MiB.");
-		patch = { avatar: (await upload(value, server, "avatar")).id };
-	} else {
-		patch = value;
-	}
-	return api<Profile>("profile", server, { [role]: patch });
-}
-
 function BackendProfileForm({
 	backends,
 	selected,
@@ -195,8 +172,8 @@ export function ProfileSettings({
 	report,
 }: {
 	profile: Profile | undefined;
-	base: string;
-	server: string;
+	base: WorkspaceClient;
+	server: WorkspaceClient;
 	onProfile: (profile: Profile) => void;
 	report: (message: string) => void;
 }) {
@@ -225,9 +202,11 @@ export function ProfileSettings({
 	function sync() {
 		void perform(async () => {
 			const target = selected ? { backend: selected } : {};
-			const synced = await api<SyncResult>("profile/sync", server, target);
+			const synced = await server.profile(
+				(await server.call("sync_profile", target)).profile,
+			);
 			setStatus(
-				synced.sync.refresh === "refreshed"
+				synced.sync?.refresh === "refreshed"
 					? "Updated from the backend."
 					: "Updated from the last saved backend profile.",
 			);
@@ -247,7 +226,7 @@ export function ProfileSettings({
 							base={base}
 							busy={busy}
 							save={(value) =>
-								void perform(() => saveIdentity(server, role, value))
+								void perform(() => server.updateIdentity(role, value))
 							}
 						/>
 					))}

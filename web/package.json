@@ -11,11 +11,12 @@
 	},
 	"scripts": {
 		"start": "node server.mjs",
-		"build": "node script/check-esbuild.mjs && vite build",
+		"build": "node script/check-esbuild.mjs && node script/build-noise.mjs && vite build && node script/noise-notices.mjs",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome lint *.ts *.tsx *.mjs app.css index.html package.json tsconfig.json public/theme.js script",
 		"format:check": "biome format *.ts *.tsx *.mjs app.css index.html package.json tsconfig.json public/theme.js script",
-		"test": "node --test ./*.test.mjs"
+		"test": "node --test ./*.test.mjs",
+		"test:noise-codec": "node script/build-noise.mjs && node --test script/noise-vector.test.mjs"
 	},
 	"dependencies": {
 		"@tiptap/core": "3.35.0",
@@ -31,6 +32,7 @@
 		"@biomejs/biome": "2.6.8",
 		"@types/react": "19.3.0",
 		"@types/react-dom": "19.3.0",
+		"binaryen": "123.0.0",
 		"typescript": "5.9.3",
 		"vite": "7.3.8"
 	}

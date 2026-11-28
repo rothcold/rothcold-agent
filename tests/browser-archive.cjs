@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 
-module.exports = async function workspaceArchive(page, origin, assertLayout) {
+module.exports = async function workspaceArchive(page, origin, assertLayout, { complete, post, pages, eventually }) {
   const sidebar = page.getByRole('complementary', {name:'Workspace navigation'});
   const categoryPane = page.locator('.category-pane');
   const breadcrumb = page.getByRole('navigation', {name:'Breadcrumb'});
@@ -31,10 +31,13 @@ module.exports = async function workspaceArchive(page, origin, assertLayout) {
   await categoryPane.getByRole('heading', {name:'Archive fixtures', exact:true}).waitFor();
   const categoryHash = new URL(page.url()).hash;
   const parked = await start('Park this thread');
+  await complete(parked.slice(1), 'First archive reply');
   await page.getByText('First archive reply', {exact:true}).waitFor();
   const reply = page.locator('#text');
   await reply.fill('Reply again');
   await reply.press('Enter');
+  const second = await eventually(async () => (await pages({type:'history',chat:parked.slice(1)})).find(row => row.text === 'Reply again'));
+  await complete(second.id, 'Second archive reply', undefined, parked.slice(1));
   await page.getByText('Second archive reply', {exact:true}).waitFor();
   await reply.fill('Draft survives thread archive');
   await page.getByRole('button', {name:'Archive thread', exact:true}).click();
@@ -45,6 +48,7 @@ module.exports = async function workspaceArchive(page, origin, assertLayout) {
   await page.getByRole('link', {name:'Back to Archive fixtures'}).click();
   await categoryPane.getByRole('heading', {name:'Archive fixtures'}).waitFor();
   const kept = await start('Keep this thread');
+  await complete(kept.slice(1), 'Fixture delivered');
   await page.getByRole('link', {name:'Back to Archive fixtures'}).click();
   await page.locator('#first-message').fill('Draft survives category rename and archive');
   const menu = categoryPane.locator('.category-menu');
@@ -91,24 +95,23 @@ module.exports = async function workspaceArchive(page, origin, assertLayout) {
   assert.deepEqual(await sameThread.locator('.inbox-preview').allTextContents(), ['Second archive reply', 'First archive reply']);
   assert.deepEqual(await sameThread.locator('.inbox-thread-title').allTextContents(), ['Park this thread', 'Park this thread']);
   await inbox.getByText('Fixture delivered', {exact:true}).waitFor();
-  const observing = page.waitForResponse(r => r.url().endsWith('/api/notifications') && r.ok());
   await inbox.getByRole('button', {name:'Enable browser alerts'}).click();
   await inbox.getByRole('button', {name:'Turn off browser alerts'}).waitFor();
-  await observing;
-  const apiOrigin = 'http://127.0.0.1:8766';
+  assert.deepEqual(await page.evaluate(() => window.sentAlerts.map(({tag}) => tag)), []);
   const longText = '工作区'.repeat(46) + '👩🏽‍🚀🌈';
   const pushId = randomUUID();
-  const pushed = await fetch(apiOrigin + '/adapter/push', {
-    method:'POST',
-    headers:{Origin:apiOrigin, Authorization:'Bearer ' + process.env.ROTHCOLD_AGENT_ADAPTER_TOKEN, 'Content-Type':'application/json'},
-    body:JSON.stringify({id:pushId, chat:kept.slice(1), text:`**${longText}** [private](https://example.invalid/path)`})
-  });
-  assert.equal(pushed.status, 200);
+  await post('push', {id:pushId, chat:kept.slice(1), text:`**${longText}** [private](https://example.invalid/path)`});
   const pushPreview = inbox.getByText(longText + '…', {exact:true});
   await pushPreview.waitFor();
   assert.equal(await inbox.locator('.inbox-preview a').count(), 0);
+  assert.equal((await pages({type:'inbox'})).find(row => row.request === pushId).unread, true, 'opening Inbox does not clear the receipt');
   const tag = `rothcold:${pushId}`;
-  await page.waitForFunction((tag) => window.sentAlerts.some(n => n.tag === tag), tag);
+  try {
+    await page.waitForFunction((tag) => window.sentAlerts.some(n => n.tag === tag), tag);
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({permission:Notification.permission, configured:localStorage.getItem('rothcold.browserAlerts'), status:document.querySelector('#notice')?.textContent, notices:window.sentAlerts.map(({tag}) => tag)}));
+    throw new Error(`Expected private notification ${tag}: ${JSON.stringify(diagnostic)}`, {cause:error});
+  }
   assert.deepEqual(await page.evaluate((tag) => window.sentAlerts.filter(n => n.tag === tag).map(n => [n.title, n.body]), tag),
                    [['Rothcold Agent', 'You have a new message.']]);
   await shot('inbox-preview', 390, 844, '.inbox-pane, .pane-scroll');
@@ -149,6 +152,7 @@ module.exports = async function workspaceArchive(page, origin, assertLayout) {
   }
   await page.reload();
   await reply.waitFor();
+  await page.evaluate(() => { document.documentElement.style.fontSize = ''; });
   assert.equal(new URL(page.url()).hash, parked);
   await page.setViewportSize({width:390, height:844});
   await page.getByRole('button', {name:'Workspace', exact:true}).click();

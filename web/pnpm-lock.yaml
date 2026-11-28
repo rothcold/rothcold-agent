@@ -42,6 +42,9 @@ importers:
       '@types/react-dom':
         specifier: 19.3.0
         version: 19.3.0(@types/react@19.3.0)
+      binaryen:
+        specifier: 123.0.0
+        version: 123.0.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -597,6 +600,10 @@ packages:
 
   '@types/use-sync-external-store@0.0.6':
     resolution: {integrity: sha512-zFDAD+tlpf2r4asuHEj0XH6pY6i0g5NeAHPn+15wk3BV6JA69eERFXC1gyGThDkVa1zCyKr5jox1+2LbV/AMLg==}
+
+  binaryen@123.0.0:
+    resolution: {integrity: sha512-/hls/a309aZCc0itqP6uhoR+5DsKSlJVfB8Opd2BY9Ndghs84IScTunlyidyF4r2Xe3lQttnfBNIDjaNpj6mTw==}
+    hasBin: true
 
   csstype@3.2.4:
     resolution: {integrity: sha512-PoKaoPzQapnEoqUSnHx1u6W6ku8CVEgKsnpmmzU3m1nwkidpPBQ8V/Zq2+bWNrsOKoKLwTGdbx6xF7BXP1zLVQ==}
@@ -1176,6 +1183,8 @@ snapshots:
       csstype: 3.2.4
 
   '@types/use-sync-external-store@0.0.6': {}
+
+  binaryen@123.0.0: {}
 
   csstype@3.2.4: {}
 

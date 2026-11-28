@@ -18,6 +18,8 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
+pub(crate) mod noise;
+
 pub const FILE_LIMIT: usize = 25 * 1024 * 1024;
 pub const AVATAR_LIMIT: usize = 5 * 1024 * 1024;
 const UNAVAILABLE: Error = Error(S::INTERNAL_SERVER_ERROR, "Attachment storage unavailable");
@@ -123,8 +125,11 @@ fn filename(headers: &HeaderMap) -> Result<String> {
         };
         decoded.push(c);
     }
-    let decoded = String::from_utf8(decoded).map_err(|_| BAD)?;
-    let name: String = decoded
+    sanitize_filename(&String::from_utf8(decoded).map_err(|_| BAD)?)
+}
+
+fn sanitize_filename(filename: &str) -> Result<String> {
+    let name: String = filename
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or_default()
@@ -243,13 +248,6 @@ fn classify(b: &[u8], declared: &str, name: &str) -> (&'static str, &'static str
     }
 }
 
-pub async fn upload(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Extension(body): Extension<Bytes>,
-) -> Result<(S, Json<Attachment>)> {
-    save(app, headers, body, false).await
-}
 pub async fn upload_backend(
     State(app): State<App>,
     headers: HeaderMap,
@@ -288,17 +286,15 @@ async fn save(
         let result = (|| {
             file.write_all(&body).map_err(|_| UNAVAILABLE)?;
             file.sync_all().map_err(|_| UNAVAILABLE)?;
-            lock(&app.db).execute(
-                "INSERT INTO attachments(id,purpose,filename,mime,kind,size) VALUES(?,?,?,?,?,?)",
-                params![id, purpose, filename, mime, kind, body.len()],
-            )?;
-            Ok(Attachment {
+            let item = Attachment {
                 id,
                 filename,
                 mime: mime.into(),
                 kind: kind.into(),
                 size: body.len() as u64,
-            })
+            };
+            record_attachment(&lock(&app.db), purpose, &item)?;
+            Ok(item)
         })();
         if result.is_err() {
             let _ = fs::remove_file(path);
@@ -308,6 +304,21 @@ async fn save(
     .await
     .map_err(|_| UNAVAILABLE)??;
     Ok((S::CREATED, Json(item)))
+}
+
+fn record_attachment(db: &Connection, purpose: &str, item: &Attachment) -> Result<()> {
+    db.execute(
+        "INSERT INTO attachments(id,purpose,filename,mime,kind,size) VALUES(?,?,?,?,?,?)",
+        params![
+            item.id,
+            purpose,
+            item.filename,
+            item.mime,
+            item.kind,
+            item.size
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn avatar_exists(db: &Connection, id: &str, backend_only: bool) -> rusqlite::Result<bool> {
@@ -352,20 +363,6 @@ fn disposition(download: bool, filename: &str) -> String {
     )
 }
 
-pub async fn view(
-    State(app): State<App>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response> {
-    serve(app, id, headers, false, false).await
-}
-pub async fn download(
-    State(app): State<App>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response> {
-    serve(app, id, headers, true, false).await
-}
 pub async fn adapter_view(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -373,6 +370,29 @@ pub async fn adapter_view(
 ) -> Result<Response> {
     serve(app, id, headers, false, true).await
 }
+fn lookup_attachment(
+    db: &Connection,
+    id: &str,
+    turn_only: bool,
+    linked_only: bool,
+) -> Result<Attachment> {
+    if crate::request_id(id).is_err() {
+        return Err(MISSING);
+    }
+    db.query_row(
+        "SELECT filename,mime,kind,size FROM attachments WHERE id=? AND (NOT ? OR purpose='turn') AND (NOT ? OR turn IS NOT NULL)",
+        params![id, turn_only, linked_only],
+        |r| Ok(Attachment { id: id.into(), filename:r.get(0)?, mime:r.get(1)?, kind:r.get(2)?, size:r.get(3)? }),
+    ).optional()?.ok_or(MISSING)
+}
+
+fn open_attachment(dir: &FsPath, id: &str) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(dir.join(id))
+}
+
 async fn serve(
     app: App,
     id: String,
@@ -380,14 +400,7 @@ async fn serve(
     download: bool,
     adapter: bool,
 ) -> Result<Response> {
-    if crate::request_id(&id).is_err() {
-        return Err(MISSING);
-    }
-    let item = lock(&app.db).query_row(
-        "SELECT filename,mime,kind,size FROM attachments WHERE id=? AND (NOT ? OR purpose='turn' AND turn IS NOT NULL)",
-        params![id, adapter],
-        |r| Ok(Attachment { id: id.clone(), filename:r.get(0)?, mime:r.get(1)?, kind:r.get(2)?, size:r.get(3)? }),
-    ).optional()?.ok_or(MISSING)?;
+    let item = lookup_attachment(&lock(&app.db), &id, adapter, adapter)?;
     let media = item.kind != "file";
     let mut range = headers.get_all(header::RANGE).iter();
     let requested = if media {
@@ -410,10 +423,7 @@ async fn serve(
     let permit = app.attachment_slots.download()?;
     let (start, len) = requested.map_or((0, item.size), |(a, b)| (a, b - a + 1));
     let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Bytes> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(app.attachments.join(id))?;
+        let mut file = open_attachment(&app.attachments, &id)?;
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = vec![0; len as usize];
         file.read_exact(&mut bytes)?;

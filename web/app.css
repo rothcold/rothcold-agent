@@ -238,6 +238,7 @@ header {
 	min-height: var(--target);
 }
 :where(#gate) input + label,
+:where(#gate) select + label,
 :where(#gate) .rename-actions {
 	margin-top: 8px;
 }

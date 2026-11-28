@@ -4,30 +4,34 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 core=${HERMES_SOURCE:-$HOME/.hermes/hermes-agent}
 py=$core/venv/bin/python
+if [ ! -x "$py" ]; then
+    echo 'script/test requires the pinned Hermes checkout and its venv (set HERMES_SOURCE).' >&2
+    exit 1
+fi
 tmp=$(mktemp -d "$root/.test-XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/home" "$tmp/tmp" "$tmp/profile"
 # This suite does not run a model server; the isolated Gateway suite tests the real title request.
 printf 'auxiliary:\n  title_generation:\n    enabled: false\n' > "$tmp/profile/config.yaml"
-script/pnpm format:check
-script/pnpm lint
-script/pnpm typecheck
-script/pnpm test
-script/pnpm build
 script/build
-(cd server && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked)
-node --check web/dist/app.js
-node --check web/server.mjs
-node --check tests/browser.cjs
+(cd server && cargo fmt --all --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --bin rothcold-agent)
+script/test-noise
+cargo build --locked --manifest-path server/Cargo.toml --target-dir server/target --release --example noise-fixture
 "$py" -I -S -X pycache_prefix="$tmp/bytecode" -m compileall -q -f -o 0 hermes-adapter/rothcold_agent tests script/stage-wheel.py
 "$py" -I -S -B script/stage-wheel.py dist/*.whl "$tmp/profile/plugins"
 install -m755 dist/rothcold-agent "$tmp/rothcold-agent"
-pw=''
-if command -v playwright >/dev/null && command -v chromium >/dev/null; then
-    pw=$(dirname "$(readlink -f "$(command -v playwright)")")
-fi
-shots=''
-if [ "${SCREENSHOTS:-0}" = 1 ]; then shots="$root/.screenshots"; mkdir -p "$shots"; fi
-env -i SHOTS="$shots" NODE="$(command -v node)" PLAYWRIGHT_DIR="$pw" CHROMIUM="$(command -v chromium || true)" PATH=/usr/bin:/bin HOME="$tmp/home" HERMES_HOME="$tmp/profile" TMPDIR="$tmp/tmp" \
+install -m755 server/target/release/examples/noise-fixture "$tmp/noise-fixture"
+env -i PATH=/usr/bin:/bin HOME="$tmp/home" HERMES_HOME="$tmp/profile" TMPDIR="$tmp/tmp" \
     HERMES_GATEWAY_LOCK_DIR="$tmp/run" HERMES_DISABLE_LAZY_INSTALLS=1 UV_OFFLINE=1 \
-    PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 PYTHONPATH="$tmp/profile/plugins:$core" "$py" -P -B -m unittest discover -s tests -v
+    PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 PYTHONPATH="$tmp/profile/plugins:$core" "$py" -P -B -m unittest discover -s tests -p test_chat.py -v
+
+# Web owns browser/TLS/second-workspace fixtures; no client HTTP test routes are staged here.
+if [ -z "${PLAYWRIGHT_DIR:-}" ] && command -v playwright >/dev/null; then
+    PLAYWRIGHT_DIR=$(dirname "$(readlink -f "$(command -v playwright)")")
+    export PLAYWRIGHT_DIR
+fi
+if [ -z "${CHROMIUM:-}" ] && command -v chromium >/dev/null; then
+    CHROMIUM=$(command -v chromium)
+    export CHROMIUM
+fi
+script/test-web

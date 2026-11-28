@@ -1,0 +1,22 @@
+#!/bin/sh
+# Launch ONLY a disposable simulator and workspace. No installed device or account is needed.
+set -eu
+cd "$(dirname "$0")/.."
+: "${PLAYWRIGHT_DIR:?Set the local Playwright package directory}"
+export PATH="$(dirname "$(rustup which cargo)"):$PATH"
+script/pnpm install --frozen-lockfile --ignore-scripts
+script/pnpm build
+script/ios-core
+cargo build --locked --manifest-path server/Cargo.toml --bin rothcold-agent
+out="$PWD/mobile/core/target/joint-$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -m 700 "$out"
+udid=$(xcrun simctl create 'Rothcold Noise Disposable 27.2' com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-2)
+cleanup() {
+    xcrun simctl shutdown "$udid" >/dev/null 2>&1 || :
+    xcrun simctl delete "$udid"
+}
+trap cleanup EXIT
+xcrun simctl boot "$udid"
+xcrun simctl bootstatus "$udid" -b
+node tests/noise-joint.cjs "$udid" "$out"
+printf 'Joint evidence: %s\n' "$out"

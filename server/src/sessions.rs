@@ -1,14 +1,9 @@
-use crate::{App, Input, Result, field, lock, same};
-use axum::{
-    Extension, Json,
-    extract::{Path, State},
-    http::StatusCode as S,
-};
+use crate::{App, Result, S, lock};
+pub use rothcold_noise_protocol::v1::Device;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
-use serde_json::{Value, json};
+#[cfg(all(test, feature = "noise-dev"))]
 use sha2::{Digest, Sha256};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const LIFETIME: i64 = 30 * 24 * 60 * 60;
@@ -23,21 +18,14 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn now() -> i64 {
+pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
 }
 
-#[derive(Clone, Serialize)]
-pub struct Device {
-    id: String,
-    name: String,
-    created_at: i64,
-    expires_at: i64,
-}
-fn device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
+pub fn device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
     Ok(Device {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -46,46 +34,66 @@ fn device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
     })
 }
 
+#[cfg(all(test, feature = "noise-dev"))]
 pub fn authenticate(db: &Connection, bearer: &[u8]) -> rusqlite::Result<Option<Device>> {
     if bearer.len() != 64 || !bearer.iter().all(u8::is_ascii_hexdigit) {
         return Ok(None);
     }
+    authenticate_hash(db, &Sha256::digest(bearer))
+}
+
+pub fn authenticate_hash(db: &Connection, hash: &[u8]) -> rusqlite::Result<Option<Device>> {
     db.query_row(
         "SELECT id,name,created_at,expires_at FROM device_sessions WHERE hash=? AND expires_at>?",
-        params![Sha256::digest(bearer).as_slice(), now()],
+        params![hash, now()],
         device,
     )
     .optional()
 }
 
-pub async fn status() -> Json<Value> {
-    Json(json!({"service":"rothcold-agent","apiVersion":1}))
+#[cfg(all(test, feature = "noise-dev"))]
+pub fn authenticate_noise_dev(
+    db: &Connection,
+    pin: &rothcold_noise_protocol::Key,
+    credential: &rothcold_noise_protocol::Key,
+) -> rusqlite::Result<Option<Device>> {
+    authenticate_hash(db, &noise_dev_hash(pin, credential))
 }
 
-pub async fn login(State(app): State<App>, Extension(data): Input) -> Result<Json<Value>> {
-    let name = if data.get("name").is_some() {
-        let name = field(&data, "name", 80)?.trim();
-        if name.chars().any(char::is_control) {
-            return Err(crate::BAD);
-        }
-        name
-    } else {
-        "Native device"
-    };
-    let mut auth = lock(&app.auth);
-    let clock = Instant::now();
-    if clock >= auth.window {
-        auth.failures = 0;
-        auth.window = clock + Duration::from_secs(60);
-    }
-    if auth.failures >= 8 {
-        return Err(crate::Error(S::TOO_MANY_REQUESTS, "Too Many Requests"));
-    }
-    if !same(field(&data, "token", 512)?.as_bytes(), app.owner.as_bytes()) {
-        auth.failures += 1;
-        return Err(crate::UNAUTHORIZED);
-    }
-    let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+#[cfg(all(test, feature = "noise-dev"))]
+pub fn provision_noise_dev(
+    db: &Connection,
+    pin: &rothcold_noise_protocol::Key,
+    credential: &rothcold_noise_protocol::Key,
+) -> rusqlite::Result<String> {
+    let id = Uuid::new_v4().to_string();
+    let created = now();
+    db.execute(
+        "INSERT INTO device_sessions(id,hash,name,created_at,expires_at) VALUES(?,?,?,?,?)",
+        params![
+            id,
+            noise_dev_hash(pin, credential),
+            "Noise dev fixture",
+            created,
+            created + LIFETIME
+        ],
+    )?;
+    Ok(id)
+}
+
+#[cfg(all(test, feature = "noise-dev"))]
+fn noise_dev_hash(
+    pin: &rothcold_noise_protocol::Key,
+    credential: &rothcold_noise_protocol::Key,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rothcold-agent/noise-dev/1/device\0");
+    hasher.update(pin);
+    hasher.update(credential);
+    hasher.finalize().into()
+}
+
+pub fn issue(db: &mut Connection, hash: &[u8], name: &str) -> Result<Device> {
     let created_at = now();
     let device = Device {
         id: Uuid::new_v4().to_string(),
@@ -93,62 +101,26 @@ pub async fn login(State(app): State<App>, Extension(data): Input) -> Result<Jso
         created_at,
         expires_at: created_at + LIFETIME,
     };
-    let db = lock(&app.db);
-    db.execute(
+    let tx = db.transaction()?;
+    tx.execute(
         "DELETE FROM device_sessions WHERE expires_at<=?",
         [created_at],
     )?;
-    db.execute(
-        "INSERT INTO device_sessions(id,hash,name,created_at,expires_at) VALUES(?,?,?,?,?)",
-        params![
-            device.id,
-            Sha256::digest(key.as_bytes()).as_slice(),
-            device.name,
-            device.created_at,
-            device.expires_at
-        ],
+    let inserted = tx.execute(
+        "INSERT INTO device_sessions(id,hash,name,created_at,expires_at) VALUES(?,?,?,?,?) ON CONFLICT(hash) DO NOTHING",
+        params![device.id, hash, device.name, device.created_at, device.expires_at],
     )?;
-    auth.failures = 0;
-    Ok(Json(json!({"session":key,"device":device})))
+    if inserted == 0 {
+        return Err(crate::Error(
+            S::CONFLICT,
+            "This device credential is already registered",
+        ));
+    }
+    tx.commit()?;
+    Ok(device)
 }
 
-pub async fn me(Extension(current): Extension<Device>) -> Json<Device> {
-    Json(current)
-}
-
-pub async fn list(
-    State(app): State<App>,
-    Extension(current): Extension<Device>,
-) -> Result<Json<Value>> {
-    let db = lock(&app.db);
-    let mut stmt = db.prepare("SELECT id,name,created_at,expires_at FROM device_sessions WHERE expires_at>? ORDER BY created_at DESC,id")?;
-    let devices = stmt
-        .query_map([now()], device)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(Json(json!({"current":current.id,"devices":devices})))
-}
-
-fn delete(app: &App, id: &str) -> rusqlite::Result<()> {
+pub fn delete(app: &App, id: &str) -> rusqlite::Result<()> {
     lock(&app.db).execute("DELETE FROM device_sessions WHERE id=?", [id])?;
     Ok(())
-}
-
-pub async fn logout(
-    State(app): State<App>,
-    Extension(current): Extension<Device>,
-) -> Result<Json<Value>> {
-    delete(&app, &current.id)?;
-    Ok(Json(json!({})))
-}
-
-pub async fn revoke(
-    State(app): State<App>,
-    Path(id): Path<String>,
-    Extension(current): Extension<Device>,
-) -> Result<Json<Value>> {
-    if Uuid::parse_str(&id).is_err() {
-        return Err(crate::BAD);
-    }
-    delete(&app, &id)?;
-    Ok(Json(json!({"current":current.id == id})))
 }

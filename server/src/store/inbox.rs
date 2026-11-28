@@ -1,6 +1,9 @@
-use super::{Result, rows};
+use super::Result;
+#[cfg(test)]
+use super::rows;
 use pulldown_cmark::{Event, Options, Parser, TagEnd};
 use rusqlite::{Connection, params};
+#[cfg(test)]
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -75,6 +78,7 @@ pub(super) fn record(db: &Connection, id: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn notifications(db: &Connection) -> Result<Value> {
     Ok(rows(db,"SELECT request,turns.chat,placement.channel,unread,chats.title,notifications.preview FROM notifications JOIN turns ON turns.id=request JOIN chats ON chats.id=turns.chat JOIN placement ON placement.chat=turns.chat ORDER BY notifications.rowid DESC",[])?.into())
 }

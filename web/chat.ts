@@ -15,13 +15,8 @@ export type InboxEvent = {
 	title: string;
 	preview: string;
 };
-export type Attachment = {
-	id: string;
-	filename: string;
-	mime: string;
-	kind: "image" | "video" | "audio" | "file";
-	size: number;
-};
+import type { Attachment } from "./noise-link.ts";
+export type { Attachment } from "./noise-link.ts";
 export type Identity = { name: string; avatar: string | null };
 export type Profile = {
 	owner: Identity;
@@ -84,73 +79,4 @@ export function replyDraft(
 }
 export function pending(turns: Turn[]): boolean {
 	return turns.some((t) => t.state !== "answered" && t.state !== "released");
-}
-export class SessionExpired extends Error {}
-
-async function decodeResponse<T>(
-	res: Response,
-	sessionRequired: boolean,
-): Promise<T> {
-	if (res.ok) return res.json();
-	if (sessionRequired && res.status === 401)
-		throw new SessionExpired(
-			"This device session expired or was revoked. Sign in again.",
-		);
-	throw new Error(await res.text());
-}
-
-async function requestJson<T>(
-	url: string,
-	options: RequestInit,
-	sessionRequired = false,
-): Promise<T> {
-	const response = await fetch(url, { ...options, redirect: "error" });
-	return decodeResponse<T>(response, sessionRequired);
-}
-
-export async function api<T>(
-	path: string,
-	server: string,
-	data?: Record<string, unknown>,
-): Promise<T> {
-	const headers = new Headers({ "X-Rothcold-Server": server });
-	if (data) headers.set("Content-Type", "application/json");
-	return requestJson<T>(
-		`/api/${path}`,
-		{
-			method: data ? "POST" : "GET",
-			headers,
-			credentials: "same-origin",
-			body: data && JSON.stringify(data),
-		},
-		path !== "login",
-	);
-}
-
-export function connection<T>(
-	path: "config" | "check",
-	server?: string,
-): Promise<T> {
-	return requestJson<T>(`/connection/${path}`, {
-		headers: server ? { "X-Rothcold-Server": server } : undefined,
-		credentials: "omit",
-	});
-}
-
-export async function upload(
-	file: File,
-	server: string,
-	purpose: "turn" | "avatar",
-): Promise<Attachment> {
-	return requestJson<Attachment>("/api/attachments", {
-		method: "POST",
-		headers: {
-			"X-Rothcold-Server": server,
-			"X-Rothcold-Filename": encodeURIComponent(file.name),
-			"X-Rothcold-Purpose": purpose,
-			"Content-Type": file.type || "application/octet-stream",
-		},
-		credentials: "same-origin",
-		body: file,
-	});
 }

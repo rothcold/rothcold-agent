@@ -10,7 +10,6 @@ if [ "${1:-}" = start ]; then
   cd "$root/web"
   # Production start needs only Node and the explicit, non-secret web settings.
   exec env -i PATH="$(dirname "$node"):/usr/bin:/bin" \
-    ${ROTHCOLD_API_URL+"ROTHCOLD_API_URL=$ROTHCOLD_API_URL"} \
     ${ROTHCOLD_WEB_CONFIG+"ROTHCOLD_WEB_CONFIG=$ROTHCOLD_WEB_CONFIG"} \
     ${ROTHCOLD_WEB_ORIGIN+"ROTHCOLD_WEB_ORIGIN=$ROTHCOLD_WEB_ORIGIN"} \
     ${ROTHCOLD_WEB_PORT+"ROTHCOLD_WEB_PORT=$ROTHCOLD_WEB_PORT"} \
@@ -32,7 +31,10 @@ if [ ! -f "$tools/pnpm/bin/pnpm.cjs" ]; then
   rm "$archive"
 fi
 cd "$root/web"
-exec env -i PATH="$(dirname "$node"):/usr/bin:/bin" HOME="$tools/home" TMPDIR="$tools/tmp" \
+path="$(dirname "$node"):/usr/bin:/bin"
+if cargo=$(command -v cargo); then path="$path:$(dirname "$cargo")"; fi
+exec env -i PATH="$path" HOME="$tools/home" TMPDIR="$tools/tmp" \
+  CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
   CI=true npm_config_userconfig=/dev/null npm_config_globalconfig=/dev/null \
   npm_config_registry=https://registry.npmjs.org/ npm_config_ignore_scripts=true \
   "$node" "$tools/pnpm/bin/pnpm.cjs" "$@"

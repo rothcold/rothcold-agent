@@ -1,114 +1,62 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer, request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
-import { pipeline } from "node:stream/promises";
+import { createServer, request } from "node:http";
 
-const loopback = new Set(["127.0.0.1", "[::1]"]);
-const maxBody = 64 * 1024 - 1;
-const maxUpload = 25 * 1024 * 1024;
-const maxAvatar = 5 * 1024 * 1024;
-const transferLimits = { upload: 2, download: 8 };
-const activeTransfers = { upload: 0, download: 0 };
-const safeMedia = new Set([
-	"image/png",
-	"image/jpeg",
-	"image/gif",
-	"image/webp",
-	"video/mp4",
-	"video/quicktime",
-	"video/webm",
-	"video/ogg",
-	"audio/mpeg",
-	"audio/wav",
-	"audio/flac",
-	"audio/ogg",
-	"audio/mp4",
-	"audio/aac",
-	"audio/webm",
-]);
-
-function address(value) {
-	try {
-		if (typeof value !== "string" || !/^https?:\/\/[\x21-\x7e]+$/.test(value))
-			return null;
-		const url = new URL(value);
-		if (
-			url.origin !== value ||
-			(url.protocol !== "https:" && !loopback.has(url.hostname))
-		)
-			return null;
-		return url;
-	} catch {
-		return null;
-	}
-}
-
-async function readWebConfig() {
-	const file = process.env.ROTHCOLD_WEB_CONFIG;
-	let config = {};
-	try {
-		config = JSON.parse(
-			await readFile(
-				file ?? new URL("./rothcold-web.json", import.meta.url),
-				"utf8",
-			),
-		);
-	} catch (error) {
-		if (file !== undefined || error.code !== "ENOENT")
-			throw new Error("Cannot read web configuration");
-	}
-	if (
-		!config ||
-		Array.isArray(config) ||
-		typeof config !== "object" ||
-		(config.trustedApis !== undefined && !Array.isArray(config.trustedApis))
-	) {
-		throw new Error("Invalid web configuration");
-	}
-	return config;
-}
-
-function configuredTargets(selected, trustedApis) {
-	const targets = new Map();
-	for (const value of [selected, ...trustedApis]) {
-		const url = address(value);
-		if (!url) throw new Error("Invalid configured API origin");
-		targets.set(value, url);
-	}
-	return targets;
-}
-
-async function readDefaultApi() {
-	try {
-		const raw = await readFile(
+const config = JSON.parse(
+	await readFile(
+		process.env.ROTHCOLD_WEB_CONFIG ??
 			new URL("./default-web-config.json", import.meta.url),
-			"utf8",
-		);
-		return JSON.parse(raw).defaultApi;
-	} catch {
-		throw new Error("Cannot read default web configuration");
-	}
-}
-
-async function configuration() {
-	const config = await readWebConfig();
-	const selected =
-		process.env.ROTHCOLD_API_URL ??
-		config.defaultApi ??
-		(await readDefaultApi());
-	const targets = configuredTargets(selected, config.trustedApis ?? []);
-	const port = Number(process.env.ROTHCOLD_WEB_PORT ?? 8765);
-	if (!Number.isInteger(port) || port < 1 || port > 65535)
-		throw new Error("Invalid web port");
-	const origin = address(
-		process.env.ROTHCOLD_WEB_ORIGIN ?? `http://127.0.0.1:${port}`,
+		"utf8",
+	),
+);
+const port = Number(process.env.ROTHCOLD_WEB_PORT ?? 8765);
+const publicOrigin =
+	process.env.ROTHCOLD_WEB_ORIGIN ?? `https://127.0.0.1:${port}`;
+const origin = new URL(publicOrigin);
+if (
+	origin.protocol !== "https:" ||
+	origin.origin !== publicOrigin ||
+	!Number.isInteger(port) ||
+	port < 1 ||
+	port > 65535
+)
+	throw new Error(
+		"Expected an exact public HTTPS origin and valid local web port",
 	);
-	if (!origin) throw new Error("Invalid web origin");
-	return { selected, targets, origin, port };
-}
 
-const { selected, targets, origin, port } = await configuration();
+const targets = new Map();
+const backends = [];
+for (const [id, backend] of Object.entries(config.backends ?? {})) {
+	if (
+		!/^[a-z0-9-]{1,40}$/.test(id) ||
+		!backend ||
+		typeof backend.label !== "string" ||
+		!backend.label.trim() ||
+		backend.label.length > 80 ||
+		!Number.isInteger(backend.port) ||
+		backend.port < 1 ||
+		backend.port > 65535 ||
+		backend.port === port ||
+		backend.port === 8766 ||
+		targets.size >= 16
+	)
+		throw new Error("Invalid configured Noise backend");
+	const host = backend.host ?? `127.0.0.1:${backend.port}`;
+	if (
+		typeof host !== "string" ||
+		!/^(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::[0-9]{1,5})?$/.test(host)
+	)
+		throw new Error("Invalid configured Noise Host");
+	const path = `/noise/${id}`;
+	const scope = createHash("sha256")
+		.update(`${id}\n${host}\n${backend.port}`)
+		.digest("hex");
+	targets.set(path, { host, port: backend.port });
+	backends.push({ id, label: backend.label, path, scope });
+}
+if (!Object.hasOwn(config.backends ?? {}, config.defaultBackend))
+	throw new Error("Missing configured default Noise backend");
+
 const assets = new Map();
 for (const [path, file, type] of [
 	["/", "index.html", "text/html; charset=utf-8"],
@@ -118,414 +66,138 @@ for (const [path, file, type] of [
 	["/brand/icon-dark.svg", "brand/icon-dark.svg", "image/svg+xml"],
 	["/brand/icon-light.svg", "brand/icon-light.svg", "image/svg+xml"],
 ]) {
-	try {
-		assets.set(path, {
-			body: await readFile(new URL(`./dist/${file}`, import.meta.url)),
-			type,
-		});
-	} catch {
-		throw new Error("Build the web app before starting it");
-	}
+	assets.set(path, {
+		type,
+		body: await readFile(new URL(`./dist/${file}`, import.meta.url)),
+	});
 }
+// This is public deployment configuration, never server status, discovery, a pin or a credential.
+assets.set("/backends.json", {
+	type: "application/json; charset=utf-8",
+	body: JSON.stringify({ defaultBackend: config.defaultBackend, backends }),
+});
 
-const secure = origin.protocol === "https:";
-function scopeHash(target) {
-	return createHash("sha256")
-		.update(`${origin.origin}\n${target.origin}`)
-		.digest("hex");
-}
-const scopedTargets = new Map(
-	[...targets.values()].map((target) => [scopeHash(target), target]),
+const only = (req, key, value) => {
+	const values = req.headersDistinct[key];
+	return values?.length === 1 && values[0] === value;
+};
+const server = createServer(
+	{ requestTimeout: 15000, headersTimeout: 10000, maxHeaderSize: 8192 },
+	(req, res) => {
+		res.setHeader(
+			"Content-Security-Policy",
+			"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+		);
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.setHeader("Referrer-Policy", "no-referrer");
+		res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+		res.setHeader("Cache-Control", "no-store");
+		const asset = req.method === "GET" && assets.get(req.url);
+		if (!only(req, "host", origin.host)) res.writeHead(403).end();
+		else if (asset)
+			res.writeHead(200, { "Content-Type": asset.type }).end(asset.body);
+		else res.writeHead(404).end();
+	},
 );
-function cookieName(target) {
-	return `${secure ? "__Host-" : ""}rothcold_${scopeHash(target)}`;
-}
-function cookie(res, name, value, age) {
-	res.setHeader(
-		"Set-Cookie",
-		`${name}=${value}; Path=${secure ? "/" : "/api/"}; Max-Age=${age}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`,
-	);
-}
-function session(req, name) {
-	const values = (req.headers.cookie ?? "")
-		.split(";")
-		.map((part) => part.trim())
-		.filter((part) => part.startsWith(`${name}=`));
-	const key = values.length === 1 ? values[0].slice(name.length + 1) : "";
-	return /^[a-f0-9]{64}$/.test(key) ? key : "";
-}
 
-function proxy(target, path, method, body, bearer, forwarded = {}) {
-	return new Promise((resolve, reject) => {
-		const headers = { Accept: "application/json", ...forwarded };
-		if (Buffer.isBuffer(body)) {
-			headers["Content-Type"] ??= "application/json";
-			headers["Content-Length"] = body.length;
-		}
-		if (bearer) headers.Authorization = `Bearer ${bearer}`;
-		const request = (target.protocol === "https:" ? httpsRequest : httpRequest)(
-			target,
-			{
-				path,
-				method,
-				headers,
-				agent: false,
-				rejectUnauthorized: true,
-			},
-			(response) => {
-				if (response.statusCode >= 300 && response.statusCode < 400) {
-					response.destroy();
-					reject(new Error("Redirect refused"));
-				} else resolve(response);
-			},
-		);
-		const deadline = setTimeout(
-			() => request.destroy(new Error("API timed out")),
-			10_000,
-		);
-		request.once("close", () => clearTimeout(deadline));
-		request.once("error", reject);
-		if (body && !Buffer.isBuffer(body)) {
-			const cancel = () => request.destroy(new Error("Upload interrupted"));
-			body.once("error", cancel);
-			request.once("close", () => {
-				body.unpipe(request);
-				body.off("error", cancel);
-			});
-			request.flushHeaders();
-			body.pipe(request);
-		} else request.end(body);
-	});
-}
-async function bytes(stream, limit) {
-	const chunks = [];
-	let size = 0;
-	for await (const chunk of stream.iterator({ destroyOnReturn: false })) {
-		size += chunk.length;
-		if (size > limit) return null;
-		chunks.push(chunk);
-	}
-	return Buffer.concat(chunks, size);
-}
-function json(res, value) {
-	res.setHeader("Content-Type", "application/json");
-	res.end(JSON.stringify(value));
-}
-function fail(res, status, message) {
-	res.statusCode = status;
-	res.setHeader("Content-Type", "text/plain; charset=utf-8");
-	res.end(message);
-}
-async function responseJson(upstream) {
+const deniedHeaders = [
+	"cookie",
+	"authorization",
+	"proxy-authorization",
+	"sec-websocket-protocol",
+	"content-length",
+	"transfer-encoding",
+];
+const reject = (socket, status) =>
+	socket.end(
+		`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+	);
+let live = 0;
+server.on("upgrade", (req, socket, head) => {
+	socket.on("error", () => socket.destroy());
+	const target = targets.get(req.url);
+	const keys = req.headersDistinct["sec-websocket-key"];
+	const key = keys?.[0];
 	if (
-		upstream.statusCode !== 200 ||
-		!["application/json", "application/json; charset=utf-8"].includes(
-			upstream.headers["content-type"],
-		)
+		!target ||
+		req.method !== "GET" ||
+		!only(req, "host", origin.host) ||
+		!only(req, "origin", origin.origin) ||
+		!only(req, "sec-websocket-version", "13") ||
+		!only(req, "upgrade", "websocket") ||
+		keys?.length !== 1 ||
+		!/^[A-Za-z0-9+/]{22}==$/.test(key) ||
+		head.length ||
+		deniedHeaders.some((name) => req.headersDistinct[name])
 	) {
-		upstream.destroy();
-		throw new Error("Invalid API response");
+		reject(socket, "403 Forbidden");
+		return;
 	}
-	const body = await bytes(upstream, 4096);
-	if (!body) {
-		upstream.destroy();
-		throw new Error("Invalid API response");
+	if (live >= 24) {
+		reject(socket, "503 Service Unavailable");
+		return;
 	}
-	try {
-		return JSON.parse(body.toString("utf8"));
-	} catch (error) {
-		throw new Error("Invalid API response", { cause: error });
-	}
-}
-async function verify(target) {
-	const info = await responseJson(await proxy(target, "/api/status", "GET"));
-	if (info?.service !== "rothcold-agent" || info?.apiVersion !== 1)
-		throw new Error("Unexpected API");
-}
-
-function apiMethod(path, method) {
-	if (
-		/^\/api\/(?:login|logout|attachments|profile\/sync|sessions\/[a-f0-9-]{36}\/revoke)$/.test(
-			path,
-		)
-	)
-		return method === "POST";
-	if (
-		/^\/api\/(?:me|sessions|notifications|directory|slash-catalog)$/.test(path)
-	)
-		return method === "GET";
-	if (
-		/^\/api\/(?:chats|channels|profile|chats\/[A-Za-z0-9_-]+\/turns)$/.test(
-			path,
-		)
-	)
-		return true;
-	return (
-		method === "POST" &&
-		(/^\/api\/chats\/[A-Za-z0-9_-]+\/(?:archive|rename|move|read(?:\/[A-Za-z0-9_-]+)?|turns\/[A-Za-z0-9_-]+\/stop-waiting)$/.test(
-			path,
-		) ||
-			/^\/api\/channels\/[A-Za-z0-9_-]+\/(?:archive|rename)$/.test(path))
-	);
-}
-
-async function withTransferSlot(res, kind, action) {
-	if (activeTransfers[kind] >= transferLimits[kind]) {
-		if (kind === "upload") res.setHeader("Connection", "close");
-		return fail(res, 503, "Attachment transfers busy. Try again.");
-	}
-	activeTransfers[kind] += 1;
-	try {
-		return await action();
-	} finally {
-		activeTransfers[kind] -= 1;
-	}
-}
-
-async function browserMedia(req, res, scope, suffix) {
-	const target = scopedTargets.get(scope);
-	if (!target) return fail(res, 404, "Not Found");
-	const bearer = session(req, cookieName(target));
-	if (!bearer) return fail(res, 401, "Sign in again.");
-	const ranges = req.headersDistinct.range;
-	if (ranges && ranges.length !== 1) return fail(res, 416, "Invalid Range.");
-	return withTransferSlot(res, "download", () =>
-		sendBrowserMedia(res, target, suffix, bearer, ranges?.[0]),
-	);
-}
-
-async function sendBrowserMedia(res, target, suffix, bearer, range) {
-	const upstream = await proxy(
-		target,
-		`/api/attachments/${suffix}`,
-		"GET",
-		undefined,
-		bearer,
-		range === undefined ? undefined : { Range: range },
-	);
-	const status = upstream.statusCode;
-	const type = upstream.headers["content-type"];
-	const disposition = upstream.headers["content-disposition"];
-	if (status === 200 || status === 206) {
-		const download =
-			suffix.endsWith("/download") || type === "application/octet-stream";
-		if (
-			(!safeMedia.has(type) && type !== "application/octet-stream") ||
-			!(download ? /^attachment;/ : /^(?:inline|attachment);/).test(
-				disposition ?? "",
-			)
-		) {
-			upstream.destroy();
-			throw new Error("Unexpected attachment response");
-		}
-	} else if (type !== undefined && type !== "text/plain; charset=utf-8") {
-		upstream.destroy();
-		throw new Error("Unexpected attachment response");
-	}
-	res.statusCode = status;
-	for (const key of [
-		"content-type",
-		"content-disposition",
-		"content-length",
-		"accept-ranges",
-		"content-range",
-	]) {
-		if (upstream.headers[key] !== undefined)
-			res.setHeader(key, upstream.headers[key]);
-	}
-	await pipeline(upstream, res);
-}
-
-async function browserUpload(req, res, target, path, bearer) {
-	const type = req.headersDistinct["content-type"];
-	if (type?.length !== 1 || req.headers["content-encoding"] !== undefined)
-		return fail(res, 415, "Expected unencoded binary data.");
-	const names = req.headersDistinct["x-rothcold-filename"];
-	const purposes = req.headersDistinct["x-rothcold-purpose"];
-	const purpose = purposes?.[0] ?? "turn";
-	if (
-		names?.length !== 1 ||
-		(purposes && purposes.length !== 1) ||
-		(purpose !== "turn" && purpose !== "avatar")
-	)
-		return fail(res, 400, "Invalid attachment headers.");
-	const limit = purpose === "avatar" ? maxAvatar : maxUpload;
-	const length = req.headers["content-length"];
-	if (length !== undefined && Number(length) > limit) {
-		res.setHeader("Connection", "close");
-		return fail(res, 413, "Request too large.");
-	}
-	const headers = {
-		"X-Rothcold-Filename": names[0],
-		"X-Rothcold-Purpose": purpose,
-		"Content-Type": type[0],
-	};
-	return withTransferSlot(res, "upload", () =>
-		sendBrowserUpload(req, res, {
-			target,
-			path,
-			bearer,
-			headers,
-			length,
-			limit,
-		}),
-	);
-}
-
-async function sendBrowserUpload(
-	req,
-	res,
-	{ target, path, bearer, headers, length, limit },
-) {
-	// The HTTP parser bounds a declared length; chunked uploads are checked before forwarding.
-	const body = length === undefined ? await bytes(req, limit) : req;
-	if (!body) {
-		res.setHeader("Connection", "close");
-		return fail(res, 413, "Request too large.");
-	}
-	if (length !== undefined) headers["Content-Length"] = length;
-	const upstream = await proxy(target, path, "POST", body, bearer, headers);
-	if (!req.complete) res.setHeader("Connection", "close");
-	await forwardApiResponse(upstream, res);
-}
-
-function allowedBrowserRequest(req, method) {
-	const originHeader = req.headersDistinct.origin;
-	const site = req.headers["sec-fetch-site"];
-	if (originHeader || method === "POST") {
-		if (originHeader?.length !== 1 || originHeader[0] !== origin.origin)
-			return false;
-	}
-	return (
-		(site === undefined || site === "same-origin") &&
-		req.headers.authorization === undefined
-	);
-}
-
-async function browserApi(req, res, path, method) {
-	if (!allowedBrowserRequest(req, method)) return fail(res, 403, "Forbidden");
-	if (path === "/connection/config" && method === "GET")
-		return json(res, { defaultApi: selected });
-	const media =
-		/^\/api\/media\/([a-f0-9]{64})\/attachments\/([a-f0-9-]{36}(?:\/download)?)$/.exec(
-			path,
-		);
-	if (media && method === "GET")
-		return browserMedia(req, res, media[1], media[2]);
-	const choices = req.headersDistinct["x-rothcold-server"];
-	const target = choices?.length === 1 && targets.get(choices[0]);
-	if (!target)
-		return fail(res, 403, "This server is not configured on this web host.");
-	if (path === "/connection/check" && method === "GET") {
-		await verify(target);
-		return json(res, {
-			verified: true,
-			mediaBase: `/api/media/${scopeHash(target)}`,
-		});
-	}
-	if (!apiMethod(path, method)) return fail(res, 404, "Not Found");
-	return authorizedApi(req, res, { target, path, method });
-}
-
-async function authorizedApi(req, res, { target, path, method }) {
-	const name = cookieName(target);
-	const login = path === "/api/login";
-	const bearer = login ? "" : session(req, name);
-	if (!login && !bearer) return fail(res, 401, "Sign in again.");
-	if (path === "/api/attachments")
-		return browserUpload(req, res, target, path, bearer);
-	let body;
-	if (method === "POST") {
-		const type = req.headersDistinct["content-type"];
-		if (
-			type?.length !== 1 ||
-			type[0] !== "application/json" ||
-			req.headers["content-encoding"] !== undefined
-		)
-			return fail(res, 415, "Expected JSON.");
-		body = await bytes(req, maxBody);
-		if (!body) return fail(res, 413, "Request too large.");
-	}
-	if (login) return browserLogin(res, target, body, name);
-	const upstream = await proxy(target, path, method, body, bearer);
-	return forwardApiResponse(upstream, res);
-}
-
-async function browserLogin(res, target, body, name) {
-	await verify(target);
-	const upstream = await proxy(target, "/api/login", "POST", body);
-	if (upstream.statusCode !== 200) {
-		upstream.destroy();
-		if (upstream.statusCode === 401)
-			return fail(res, 401, "Invalid owner token.");
-		if (upstream.statusCode === 429)
-			return fail(res, 429, "Too many attempts. Try again shortly.");
-		if (upstream.statusCode === 400)
-			return fail(res, 400, "Invalid login details.");
-		throw new Error("Invalid login response");
-	}
-	const { session: key, device } = await responseJson(upstream);
-	const age = device?.expires_at - Math.floor(Date.now() / 1000);
-	if (
-		typeof key !== "string" ||
-		!/^[a-f0-9]{64}$/.test(key) ||
-		!Number.isSafeInteger(age) ||
-		age <= 0 ||
-		age > 31 * 86400
-	)
-		throw new Error("Invalid login response");
-	cookie(res, name, key, age);
-	return json(res, {});
-}
-
-async function forwardApiResponse(upstream, res) {
-	// Logout revokes the submitted bearer upstream. Neither logout nor a 401
-	// may erase a newer cookie set by a concurrent login.
-	const type = upstream.headers["content-type"];
-	if (type !== "application/json" && type !== "text/plain; charset=utf-8") {
-		upstream.destroy();
-		throw new Error("Unexpected API response type");
-	}
-	res.statusCode = upstream.statusCode;
-	res.setHeader("Content-Type", type);
-	await pipeline(upstream, res);
-}
-
-async function serve(req, res) {
-	res.setHeader(
-		"Content-Security-Policy",
-		"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
-	);
-	res.setHeader("X-Content-Type-Options", "nosniff");
-	res.setHeader("Referrer-Policy", "no-referrer");
-	res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-	res.setHeader("Cache-Control", "no-store");
-	const { url: path, method } = req;
-	if (
-		req.headersDistinct.host?.length !== 1 ||
-		req.headers.host !== origin.host
-	)
-		return fail(res, 403, "Forbidden");
-	if (method !== "GET" && method !== "POST")
-		return fail(res, 405, "Method Not Allowed");
-	if (path.startsWith("/api/") || path.startsWith("/connection/"))
-		return browserApi(req, res, path, method);
-	const asset = method === "GET" && assets.get(path);
-	if (!asset) return fail(res, 404, "Not Found");
-	res.setHeader("Content-Type", asset.type);
-	res.end(asset.body);
-}
-
-createServer({ requestTimeout: 15_000, headersTimeout: 10_000 }, (req, res) => {
-	serve(req, res).catch(() => {
-		if (res.headersSent) res.destroy();
-		else
-			fail(
-				res,
-				502,
-				"Could not verify or reach the configured Rothcold Agent API.",
-			);
+	live++;
+	const upstream = request({
+		host: "127.0.0.1",
+		port: target.port,
+		path: "/noise",
+		method: "GET",
+		agent: false,
+		maxHeaderSize: 4096,
+		headers: {
+			Host: target.host,
+			Origin: req.headers.origin,
+			Upgrade: "websocket",
+			Connection: "Upgrade",
+			"Sec-WebSocket-Version": "13",
+			"Sec-WebSocket-Key": key,
+		},
 	});
-}).listen(port, "127.0.0.1", () =>
+	let tunnel;
+	const timeout = setTimeout(() => upstream.destroy(), 5000);
+	socket.once("close", () => {
+		live--;
+		clearTimeout(timeout);
+		upstream.destroy();
+		tunnel?.destroy();
+	});
+	upstream.once("error", () => {
+		if (!socket.destroyed) reject(socket, "502 Bad Gateway");
+	});
+	upstream.once("response", (res) => {
+		res.destroy();
+		if (!socket.destroyed) reject(socket, "502 Bad Gateway");
+	});
+	upstream.once("upgrade", (res, peer, first) => {
+		clearTimeout(timeout);
+		tunnel = peer;
+		const accept = createHash("sha1")
+			.update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+			.digest("base64");
+		if (
+			socket.destroyed ||
+			res.statusCode !== 101 ||
+			!only(res, "upgrade", "websocket") ||
+			!only(res, "sec-websocket-accept", accept) ||
+			res.headersDistinct["sec-websocket-protocol"] ||
+			res.headersDistinct["sec-websocket-extensions"] ||
+			first.length
+		) {
+			peer.destroy();
+			if (!socket.destroyed) reject(socket, "502 Bad Gateway");
+			return;
+		}
+		peer.once("error", () => socket.destroy());
+		peer.once("close", () => socket.destroy());
+		socket.write(
+			`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+		);
+		// No extensions are relayed; the Rust connector enforces binary/record limits and lifetimes.
+		socket.pipe(peer).pipe(socket);
+	});
+	upstream.end();
+});
+server.listen(port, "127.0.0.1", () =>
 	process.stdout.write(`Rothcold web listening for ${origin.origin}\n`),
 );

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Exercise the normal binary first; retain the opt-in development regression tests.
+set -eu
+cd "$(dirname "$0")/.."
+cargo test --locked --manifest-path server/Cargo.toml -p rothcold-noise-protocol
+cargo test --locked --manifest-path server/Cargo.toml --test noise-v1
+cargo check --locked --manifest-path server/Cargo.toml -p rothcold-noise-protocol --target wasm32-unknown-unknown
+if [ "$(uname -s)" = Darwin ]; then
+  cargo check --locked --manifest-path server/Cargo.toml -p rothcold-noise-protocol --target aarch64-apple-ios
+fi
+exec cargo test --locked --manifest-path server/Cargo.toml --features noise-dev --bin rothcold-agent noise_dev::tests

@@ -57,30 +57,13 @@ impl Mailbox {
         self.last_poll
             .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
     }
-    fn card(&self, chat: &str, id: &str) -> Option<&Card> {
+    pub fn card(&self, chat: &str, id: &str) -> Option<&Card> {
         if !self.live() || self.decisions.iter().any(|(c, i, _)| c == chat && i == id) {
             return None;
         }
         self.cards.iter().find(|c| c.chat == chat && c.id == id)
     }
-    pub fn annotate(&self, chat: &str, history: &mut Value) {
-        let Some(turns) = history.as_array_mut() else {
-            return;
-        };
-        for turn in turns {
-            if !matches!(turn["state"].as_str(), Some("reserved" | "accepted")) {
-                continue;
-            }
-            let Some(updates) = turn["updates"].as_array_mut() else {
-                continue;
-            };
-            for update in updates {
-                if let Some(card) = update["id"].as_str().and_then(|id| self.card(chat, id)) {
-                    update["choices"] = json!(card.choices);
-                }
-            }
-        }
-    }
+    #[cfg(test)]
     pub fn answer(&mut self, chat: &str, id: &str, text: &str) -> Result<()> {
         let normalized = text.to_ascii_lowercase();
         let args: Vec<_> = normalized.split_whitespace().collect();
@@ -95,6 +78,9 @@ impl Mailbox {
                 ));
             }
         };
+        self.answer_choice(chat, id, choice)
+    }
+    pub fn answer_choice(&mut self, chat: &str, id: &str, choice: &str) -> Result<()> {
         if !self
             .card(chat, id)
             .is_some_and(|c| c.choices.iter().any(|v| v == choice))

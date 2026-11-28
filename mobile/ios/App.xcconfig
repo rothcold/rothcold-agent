@@ -1,0 +1,26 @@
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+TARGETED_DEVICE_FAMILY = 1
+ARCHS = arm64
+SUPPORTS_MACCATALYST = NO
+SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO
+IPHONEOS_DEPLOYMENT_TARGET = 26.0
+
+PRODUCT_NAME = $(TARGET_NAME)
+PRODUCT_BUNDLE_IDENTIFIER = org.rothcold.agent.ios
+ALWAYS_SEARCH_USER_PATHS = NO
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+CODE_SIGN_STYLE = Automatic
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_KEY_CFBundleDisplayName = Rothcold Agent
+INFOPLIST_KEY_UILaunchScreen_Generation = YES
+INFOPLIST_KEY_NSLocalNetworkUsageDescription = Connect to the Rothcold server you choose on your private network.
+
+SWIFT_VERSION = 6.0
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+SWIFT_INCLUDE_PATHS = $(SRCROOT)/Generated
+OTHER_SWIFT_FLAGS = $(inherited) -Xcc -fmodule-map-file="$(SRCROOT)/Generated/rothcold_mobileFFI.modulemap"
+ROTHCOLD_CORE_TARGET[sdk=iphoneos*] = aarch64-apple-ios
+ROTHCOLD_CORE_TARGET[sdk=iphonesimulator*] = aarch64-apple-ios-sim
+OTHER_LDFLAGS = $(inherited) "$(SRCROOT)/../core/target/$(ROTHCOLD_CORE_TARGET)/release/librothcold_mobile.a"

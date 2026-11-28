@@ -5,10 +5,17 @@ import {
 	type Dispatch,
 	type SetStateAction,
 } from "react";
-import { type Attachment, upload } from "./chat.ts";
+import type { Attachment } from "./chat.ts";
+import { useMedia, saveDownload } from "./noise-media.ts";
+import type { WorkspaceClient } from "./noise-workspace.ts";
 import { WorkspaceIcon } from "./workspace-icon.tsx";
 
-type PendingFile = { key: string; file: File; item?: Attachment };
+type PendingFile = {
+	key: string;
+	file: File;
+	item?: Attachment;
+	abort: AbortController;
+};
 export type AttachmentDrafts = Record<string, PendingFile[]>;
 export type SetAttachmentDrafts = Dispatch<SetStateAction<AttachmentDrafts>>;
 
@@ -16,7 +23,7 @@ export function attachmentDraft(
 	drafts: AttachmentDrafts,
 	setDrafts: SetAttachmentDrafts,
 	key: string,
-	server: string,
+	server: WorkspaceClient,
 	report: (message: string) => void,
 ) {
 	const entries = drafts[key] ?? [];
@@ -36,16 +43,23 @@ export function attachmentDraft(
 		const picked = Array.from(files, (file) => ({
 			file,
 			key: crypto.randomUUID(),
+			abort: new AbortController(),
 		}));
 		write((list) => [...list, ...picked]);
 		void (async () => {
 			for (const entry of picked) {
 				try {
-					const item = await upload(entry.file, server, "turn");
+					const item = await server.upload(
+						entry.file,
+						"turn",
+						entry.abort.signal,
+					);
+					if (server.signal.aborted || entry.abort.signal.aborted) continue;
 					write((list) =>
 						list.map((old) => (old.key === entry.key ? { ...old, item } : old)),
 					);
 				} catch (error) {
+					if (server.signal.aborted || entry.abort.signal.aborted) continue;
 					write((list) => list.filter((old) => old.key !== entry.key));
 					report(
 						error instanceof Error ? error.message : "File upload failed.",
@@ -59,8 +73,10 @@ export function attachmentDraft(
 		add,
 		busy: entries.some((entry) => !entry.item),
 		ids: entries.flatMap((entry) => (entry.item ? [entry.item.id] : [])),
-		remove: (key: string) =>
-			write((list) => list.filter((entry) => entry.key !== key)),
+		remove: (key: string) => {
+			entries.find((entry) => entry.key === key)?.abort.abort();
+			write((list) => list.filter((entry) => entry.key !== key));
+		},
 		clear: () =>
 			write((list) =>
 				list.filter((entry) => !entries.some((old) => old.key === entry.key)),
@@ -194,17 +210,91 @@ export function PendingAttachments({
 		</ul>
 	);
 }
+function SentAttachment({
+	item,
+	client,
+	preview,
+	report,
+}: {
+	item: Attachment;
+	client: WorkspaceClient;
+	preview: (item: Attachment) => void;
+	report: (message: string) => void;
+}) {
+	const row = useRef<HTMLLIElement>(null);
+	const request = useRef<AbortController>(undefined);
+	const [visible, setVisible] = useState(false);
+	const [downloading, setDownloading] = useState(false);
+	useEffect(() => {
+		const el = row.current;
+		if (!el || item.kind === "file") return;
+		const observer = new IntersectionObserver(
+			([event]) => setVisible(event.isIntersecting),
+			{ rootMargin: "250px" },
+		);
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, [item.kind]);
+	useEffect(() => () => request.current?.abort(), []);
+	const source = useMedia(client, visible ? item.id : null, item.kind);
+	async function download() {
+		if (request.current) return;
+		const abort = new AbortController();
+		request.current = abort;
+		setDownloading(true);
+		try {
+			await saveDownload(client, item.id, abort.signal);
+		} catch (error) {
+			if (!abort.signal.aborted && !client.signal.aborted)
+				report(error instanceof Error ? error.message : "Download failed.");
+		} finally {
+			request.current = undefined;
+			if (!abort.signal.aborted) setDownloading(false);
+		}
+	}
+	return (
+		<li ref={row}>
+			<div className="attachment-heading">
+				<MediaMeta item={item} />
+				<button
+					className="quiet"
+					type="button"
+					disabled={downloading}
+					aria-label={`Download ${item.filename}`}
+					onClick={() => void download()}
+				>
+					Download
+				</button>
+			</div>
+			{item.kind === "image" ? (
+				<button
+					type="button"
+					className="attachment-image quiet"
+					aria-label={`Preview ${item.filename}`}
+					onClick={() => preview(item)}
+				>
+					{source ? <MediaPreview item={item} source={source} /> : "Preview"}
+				</button>
+			) : (
+				source && <MediaPreview item={item} source={source} />
+			)}
+		</li>
+	);
+}
 export function SentAttachments({
 	items,
 	base,
+	report,
 }: {
 	items: Attachment[];
-	base: string;
+	base: WorkspaceClient;
+	report: (message: string) => void;
 }) {
 	const [preview, setPreview] = useState<Attachment>();
 	const dialog = useRef<HTMLDialogElement>(null);
+	const source = useMedia(base, preview?.id, "image");
 	useEffect(() => {
-		if (preview) dialog.current?.showModal();
+		if (preview && !dialog.current?.open) dialog.current?.showModal();
 	}, [preview]);
 	return (
 		<>
@@ -212,35 +302,15 @@ export function SentAttachments({
 				className="attachment-list sent-attachments"
 				aria-label="Message attachments"
 			>
-				{items.map((item) => {
-					const source = `${base}/attachments/${item.id}`;
-					return (
-						<li key={item.id}>
-							<div className="attachment-heading">
-								<MediaMeta item={item} />
-								<a
-									href={`${source}/download`}
-									download={item.filename}
-									aria-label={`Download ${item.filename}`}
-								>
-									Download
-								</a>
-							</div>
-							{item.kind === "image" ? (
-								<button
-									type="button"
-									className="attachment-image quiet"
-									aria-label={`Preview ${item.filename}`}
-									onClick={() => setPreview(item)}
-								>
-									<MediaPreview item={item} source={source} />
-								</button>
-							) : (
-								<MediaPreview item={item} source={source} />
-							)}
-						</li>
-					);
-				})}
+				{items.map((item) => (
+					<SentAttachment
+						key={item.id}
+						item={item}
+						client={base}
+						preview={setPreview}
+						report={report}
+					/>
+				))}
 			</ul>
 			<dialog
 				className="image-dialog"
@@ -260,10 +330,11 @@ export function SentAttachments({
 								Close preview
 							</button>
 						</div>
-						<img
-							src={`${base}/attachments/${preview.id}`}
-							alt={preview.filename}
-						/>
+						{source ? (
+							<img src={source} alt={preview.filename} />
+						) : (
+							<p>Loading preview…</p>
+						)}
 					</>
 				)}
 			</dialog>

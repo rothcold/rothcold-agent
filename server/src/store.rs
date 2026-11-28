@@ -2,6 +2,7 @@ use rusqlite::{
     Connection, OptionalExtension, Params, Result as SqlResult, TransactionBehavior, params,
 };
 use serde_json::{Value, json};
+#[cfg(test)]
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -25,21 +26,22 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // Only TEXT, INTEGER and NULL columns are exposed by the fixed read queries.
 pub(crate) fn rows(db: &Connection, sql: &str, args: impl Params) -> SqlResult<Vec<Value>> {
-    use rusqlite::types::ValueRef;
     let mut stmt = db.prepare(sql)?;
-    stmt.query_map(args, |r| {
-        let mut obj = serde_json::Map::new();
-        for (i, name) in r.as_ref().column_names().into_iter().enumerate() {
-            let v = match r.get_ref(i)? {
-                ValueRef::Integer(x) => json!(x),
-                ValueRef::Null => Value::Null,
-                _ => json!(r.get::<_, String>(i)?),
-            };
-            obj.insert(name.into(), v);
-        }
-        Ok(Value::Object(obj))
-    })?
-    .collect()
+    stmt.query_map(args, json_row)?.collect()
+}
+
+fn json_row(row: &rusqlite::Row<'_>) -> SqlResult<Value> {
+    use rusqlite::types::ValueRef;
+    let mut obj = serde_json::Map::new();
+    for (i, name) in row.as_ref().column_names().into_iter().enumerate() {
+        let v = match row.get_ref(i)? {
+            ValueRef::Integer(x) => json!(x),
+            ValueRef::Null => Value::Null,
+            _ => json!(row.get::<_, String>(i)?),
+        };
+        obj.insert(name.into(), v);
+    }
+    Ok(Value::Object(obj))
 }
 
 const INTERRUPT: &str = "UPDATE turns SET state='unknown' WHERE state IN ('reserved','accepted')";
@@ -288,11 +290,12 @@ pub fn category(db: &mut Connection, name: &str) -> Result<Value> {
     tx.commit()?;
     Ok(json!({"id":id}))
 }
-fn title(db: &Connection, chat: &str) -> Result<String> {
+pub(crate) fn title(db: &Connection, chat: &str) -> Result<String> {
     db.query_row("SELECT title FROM chats WHERE id=?", [chat], |r| r.get(0))
         .optional()?
         .ok_or(Error::Missing)
 }
+#[cfg(test)]
 pub fn history(db: &Connection, chat: &str) -> Result<Value> {
     title(db, chat)?;
     let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
@@ -327,7 +330,7 @@ pub fn history(db: &Connection, chat: &str) -> Result<Value> {
     }
     Ok(turns.into())
 }
-fn turn_attachments(db: &Connection, id: &str) -> SqlResult<Vec<Value>> {
+pub(crate) fn turn_attachments(db: &Connection, id: &str) -> SqlResult<Vec<Value>> {
     rows(
         db,
         "SELECT id,filename,mime,kind,size FROM attachments WHERE turn=? ORDER BY position",

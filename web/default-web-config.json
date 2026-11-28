@@ -1,3 +1,6 @@
 {
-	"defaultApi": "http://127.0.0.1:8766"
+	"defaultBackend": "local",
+	"backends": {
+		"local": { "label": "Local server", "port": 8767 }
+	}
 }

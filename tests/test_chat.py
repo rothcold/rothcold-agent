@@ -1,21 +1,18 @@
+"""Pinned Hermes adapter behavior on real Noise workspace and loopback adapter listeners."""
 import asyncio
 import math
 import os
 import secrets
-import shutil
 import sqlite3
-import ssl
 import struct
 import subprocess
 import sys
-import time
 import unittest
 import wave
 import zlib
 from contextlib import asynccontextmanager, closing, suppress
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
 from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,22 +31,13 @@ def local_only(event, args):
 
 sys.addaudithook(local_only)
 # Load the HTTP client and gateway only after installing the loopback audit hook.
-from aiohttp import (  # noqa: E402
-    ClientSession,
-    CookieJar,
-    DummyCookieJar,
-    UnixConnector,
-    web,
-)
-from gateway.config import PlatformConfig  # noqa: E402
-from gateway.platform_registry import platform_registry  # noqa: E402
-from hermes_cli.plugins import PluginManager  # noqa: E402
-from http_ingress import api_request, relay  # noqa: E402
-from yarl import URL  # noqa: E402
+from aiohttp import ClientSession  # pyright: ignore[reportMissingImports]  # noqa: E402
+from gateway.config import PlatformConfig  # pyright: ignore[reportMissingImports]  # noqa: E402
+from gateway.platform_registry import platform_registry  # pyright: ignore[reportMissingImports]  # noqa: E402
+from hermes_cli.plugins import PluginManager  # pyright: ignore[reportMissingImports]  # noqa: E402
+from noise_fixture import NoiseFixture  # noqa: E402
 
 ORIGIN = 'http://127.0.0.1:8766'
-WEB = 'http://127.0.0.1:8765'
-BROWSER_TMP = str(Path('/proc') / str(os.getpid()) / 'cwd' / PROFILE.parent.name / 'tmp')
 
 
 
@@ -106,78 +94,140 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         bridge = secrets.token_urlsafe(32)
         os.environ.update(ROTHCOLD_AGENT_OWNER_TOKEN=self.token, ROTHCOLD_AGENT_ADAPTER_TOKEN=bridge,
                           ROTHCOLD_AGENT_ALLOWED_USERS='owner')
+        self.bridge_token = bridge
         self.bridge = {'Origin': ORIGIN, 'Authorization': 'Bearer ' + bridge}
+        self.owner_headers = {'Origin': ORIGIN, 'Authorization': 'Bearer '+self.token}
         self.bridge_bearer = {'Authorization': self.bridge['Authorization']}
         data_dir = PROFILE.parent/self._testMethodName
         if self._testMethodName == 'test_existing_python_workspace':
-            data_dir.mkdir()
+            data_dir.mkdir(mode=0o700)
             with sqlite3.connect(data_dir/'history.sqlite3') as db:
                 db.executescript((ROOT/'tests/python-v2.sql').read_text())
                 db.execute('PRAGMA user_version = 2')
             db.close()
         self.data_dir = data_dir
+        self.server_env = dict(os.environ, ROTHCOLD_DATA_DIR=str(data_dir), ROTHCOLD_NOISE_NATIVE_BIND='127.0.0.1:0')
+        self.binary = PROFILE.parent/'rothcold-agent'
+        self.pin = subprocess.check_output([self.binary, 'noise-pin'], env=self.server_env, text=True, timeout=5).strip()
+        self.pin_bytes = list(bytes.fromhex(self.pin))
         self.proc = await self.start_api()
         self.addAsyncCleanup(self.stop_api)
+        self.device = self.connect_noise()
 
         entry = platform_registry.get('rothcold_agent')
         assert entry is not None and entry.check_fn()
         adapter = platform_registry.create_adapter('rothcold_agent', PlatformConfig(enabled=True))
         assert adapter is not None
         self.adapter = adapter
-        if self._testMethodName not in {'test_profile_autofill_customizations_and_live_refresh',
-                                        'test_browser_profiles_attachments_and_moves'}:
+        if self._testMethodName != 'test_profile_autofill_customizations_and_live_refresh':
             self.assertTrue(await self.adapter.connect())
         self.addAsyncCleanup(self.adapter.disconnect)
         self.client = ClientSession()
         self.addAsyncCleanup(self.client.close)
-        self.auth = {}
 
     async def start_api(self):
-        proc = await asyncio.create_subprocess_exec(PROFILE.parent/'rothcold-agent', stdout=asyncio.subprocess.PIPE,
-                env=dict(os.environ, ROTHCOLD_DATA_DIR=str(self.data_dir)),
-                umask=0 if self._testMethodName == 'test_cli_history_permissions' else -1)
-        assert proc.stdout is not None
-        self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 5),
-                         f'Rothcold Agent listening on {ORIGIN}\n'.encode())
-        return proc
+        proc = await asyncio.create_subprocess_exec(self.binary, stdout=asyncio.subprocess.PIPE,
+                env=self.server_env, umask=0 if self._testMethodName == 'test_cli_history_permissions' else -1)
+        try:
+            assert proc.stdout is not None
+            self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 5),
+                             f'Rothcold Agent adapter listening on {ORIGIN}\n'.encode())
+            native = (await asyncio.wait_for(proc.stdout.readline(), 5)).decode().strip()
+            prefix = 'Rothcold Agent native Noise listening on '
+            self.assertTrue(native.startswith(prefix + '127.0.0.1:'))
+            self.native = native.removeprefix(prefix)
+            return proc
+        except BaseException:
+            if proc.returncode is None:
+                proc.terminate()
+            await proc.wait()
+            raise
 
     async def stop_api(self):
         if self.proc.returncode is None:
             self.proc.terminate()
         await self.proc.wait()
 
-    async def start_web(self, entry=ROOT/'web/server.mjs', **settings):
-        proc = await asyncio.create_subprocess_exec(os.environ['NODE'], entry,
-                stdout=asyncio.subprocess.PIPE, env=settings)
-        async def stop():
-            if proc.returncode is None:
-                proc.terminate()
-            await proc.wait()
-        self.addAsyncCleanup(stop)
-        assert proc.stdout is not None
-        origin = settings.get('ROTHCOLD_WEB_ORIGIN', WEB)
-        self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 5),
-                         f'Rothcold web listening for {origin}\n'.encode())
-        return stop
+    def connect_noise(self, pin=None):
+        client = NoiseFixture(PROFILE.parent/'noise-fixture', self.native, self.pin if pin is None else pin)
+        self.addCleanup(client.close)
+        return client
 
-    async def post(self, path, data):
-        return await self.client.post(ORIGIN + path, json=data, headers=self.auth)
+    async def request(self, operation, *, via=None, error=None, **fields):
+        client = self.device if via is None else via
+        outcome = await asyncio.to_thread(client.exchange, operation, **fields)
+        if error is not None:
+            self.assertEqual((outcome['type'], outcome.get('code')), ('error', error), outcome)
+        else:
+            self.assertNotEqual(outcome['type'], 'error', outcome)
+        return outcome
 
-    async def get(self, path):
-        response = await self.client.get(ORIGIN + path, headers=self.auth)
-        self.assertEqual(response.status, 200)
-        return await response.json()
+    async def login(self, *, via=None, name='Fixture device'):
+        return await self.request('login_native', via=via, owner_token=self.token, name=name)
 
-    async def login(self):
-        r = await self.post('/api/login', {'token':self.token})
-        self.assertEqual(r.status, 200)
-        self.auth['Authorization'] = 'Bearer ' + (await r.json())['session']
+    async def resume(self, session, *, via=None, error=None):
+        return await self.request('resume_native', via=via, error=error,
+                                  pin=self.pin_bytes, credential=session['credential'])
 
-    async def upload(self, filename, content, mime, purpose='turn'):
-        return await self.client.post(ORIGIN + '/api/attachments', data=BytesIO(content), headers={
-            **self.auth, 'Content-Type': mime, 'X-Rothcold-Filename': quote(filename, safe=''),
-            'X-Rothcold-Purpose': purpose,
-        })
+    async def pages(self, operation, **fields):
+        return await asyncio.to_thread(self.device.pages, operation, **fields)
+
+    async def history(self, chat):
+        return await asyncio.to_thread(self.device.history, chat)
+
+    async def threads(self):
+        return await asyncio.to_thread(self.device.threads)
+
+    async def profile(self):
+        profile = (await self.request('profile'))['profile']
+        return dict(profile, backends=await self.pages('profile_backends'))
+
+    async def edit_profile(self, **identities):
+        for identity in identities.values():
+            if 'avatar' in identity:
+                id_ = identity['avatar']
+                identity['avatar'] = {'type': 'clear'} if id_ is None else {'type': 'set', 'id': id_}
+        return (await self.request('update_profile', **identities))['profile']
+
+    async def start_thread(self, message, *, channel='general', via=None, error=None, fresh: bool | None = True):
+        result = await self.request('start_thread', via=via, error=error, channel=channel, message=message)
+        if error is None and fresh is not None:
+            self.assertIs(result['fresh'], fresh)
+        return result
+
+    async def send_turn(self, chat, message, *, error=None, fresh=True):
+        result = await self.request('send_turn', error=error, chat=chat, message=message)
+        if error is None:
+            self.assertIs(result['fresh'], fresh)
+        return result
+
+    async def file_step(self, operation, *, via=None, error=None, **fields):
+        return await self.request('fixture_file_step', via=via, error=error, request={'type': operation, **fields})
+
+    async def upload(self, filename, content, mime, purpose='turn', *, error=None):
+        result = await self.request('fixture_upload', error=error, filename=filename, bytes=list(content),
+                                    mime=mime, purpose=purpose)
+        if error is None:
+            self.assertEqual(result['type'], 'upload_complete')
+            return result['attachment']
+        return result
+
+    async def download(self, id_):
+        outcome = await self.file_step('download', id=id_)
+        self.assertEqual(outcome['type'], 'download_start')
+        attachment = outcome['attachment']
+        content = bytearray()
+        sequence = 0
+        while True:
+            outcome = await self.file_step('download_next')
+            if outcome['type'] == 'download_complete':
+                break
+            self.assertEqual((outcome['type'], outcome['sequence']), ('fixture_chunk', sequence))
+            self.assertEqual(len(outcome['bytes']), min(32768, attachment['size'] - len(content)))
+            sequence += 1
+            content.extend(outcome['bytes'])
+        self.assertEqual(len(content), attachment['size'])
+        return attachment, bytes(content)
 
     def profile_fixture(self, name, avatar=None):
         set_fixture_profile(name, avatar)
@@ -193,7 +243,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
     async def await_profile(self, name):
         async with asyncio.timeout(5):
             while True:
-                profile = await self.get('/api/profile')
+                profile = await self.profile()
                 if any(backend['name'] == name for backend in profile['backends']):
                     return profile
                 await asyncio.sleep(.05)
@@ -201,20 +251,19 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
     async def test_profile_autofill_customizations_and_live_refresh(self):
         await self.adapter.disconnect()
         await self.login()
-        self.assertEqual((await self.post('/api/profile/sync', {})).status, 409)
+        await self.request('sync_profile', error='conflict')
         self.profile_fixture('Studio Hermes', sample_png())
         self.assertTrue(await self.adapter.connect())
         original = await self.await_profile('Studio Hermes')
         self.assertEqual(original['agent']['name'], 'Studio Hermes')
         self.assertIsNotNone(original['agent']['avatar'])
         self.assertEqual(original['agent']['avatar'], original['backends'][0]['avatar'])
-        self.assertEqual((await self.client.get(ORIGIN + '/api/attachments/' + original['agent']['avatar'])).status, 401)
+        await self.file_step('download', via=self.connect_noise(), id=original['agent']['avatar'], error='unauthorized')
         saved = await self.upload('custom.png', sample_png((231, 198, 143)), 'image/png', 'avatar')
-        self.assertEqual(saved.status, 201)
-        owner_avatar = (await saved.json())['id']
+        owner_avatar = saved['id']
         custom = {'name': 'Local agent', 'avatar': owner_avatar}
         owner = {'name': 'Studio owner', 'avatar': owner_avatar}
-        self.assertEqual((await self.post('/api/profile', {'owner': owner, 'agent': custom})).status, 200)
+        await self.edit_profile(owner=dict(owner), agent=dict(custom))
         await self.adapter.disconnect()
         set_fixture_profile('Changed in Hermes')
         self.assertTrue(await self.adapter.connect())
@@ -222,9 +271,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unchanged['agent'], custom)
         self.assertEqual(unchanged['backends'][0]['avatar'], original['agent']['avatar'])
         set_fixture_profile('Refreshed in Hermes', sample_png((133, 185, 154)))
-        response = await self.post('/api/profile/sync', {'backend': 'hermes'})
-        self.assertEqual(response.status, 200)
-        synced = await response.json()
+        synced = (await self.request('sync_profile', backend='hermes'))['profile']
         self.assertEqual(synced['sync'], {'backend': 'hermes', 'refresh': 'refreshed', 'name': True, 'avatar': True})
         self.assertEqual(synced['agent']['name'], 'Refreshed in Hermes')
         self.assertNotEqual(synced['agent']['avatar'], original['agent']['avatar'])
@@ -232,17 +279,17 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.data_dir/'history.sqlite3')) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM attachments WHERE purpose='backend_avatar'").fetchone(), (2,))
         (PROFILE/'assets/avatar.png').unlink()
-        last = await (await self.post('/api/profile/sync', {})).json()
-        self.assertIsNone(last['backends'][0]['avatar'])
+        last = (await self.request('sync_profile'))['profile']
+        self.assertIsNone((await self.pages('profile_backends'))[0]['avatar'])
         self.assertEqual(last['agent']['avatar'], synced['agent']['avatar'])
 
     async def test_profile_sync_preserves_newer_agent_edit_and_requires_matching_report(self):
         await self.adapter.disconnect()
-        await self.login()
-        avatar = (await self.upload('owner.png', sample_png(), 'image/png', 'avatar'))
-        self.assertEqual(avatar.status, 201)
-        avatar_id = (await avatar.json())['id']
-        self.assertEqual((await self.post('/api/profile', {'agent': {'name': 'Custom', 'avatar': avatar_id}})).status, 200)
+        session = await self.login()
+        sync_device = self.connect_noise()
+        await self.resume(session, via=sync_device)
+        avatar = await self.upload('owner.png', sample_png(), 'image/png', 'avatar')
+        await self.edit_profile(agent={'name': 'Custom', 'avatar': avatar['id']})
         backend_avatar = await self.client.post(ORIGIN+'/adapter/avatar', data=sample_png(), headers={
             **self.bridge, 'Content-Type': 'image/png', 'X-Rothcold-Filename': 'backend.png',
         })
@@ -265,140 +312,43 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(.01)
 
         await bridge_post('claim', {'backend': 'hermes'})
-        request = asyncio.create_task(self.post('/api/profile/sync', {'backend': 'hermes'}))
+        request = asyncio.create_task(self.request('sync_profile', via=sync_device, backend='hermes', error='conflict'))
         stale = await claim_refresh()
         # Clearing fields is manual too; a correlated report must not passively refill them.
-        self.assertEqual((await self.post('/api/profile', {'agent': {'name': '', 'avatar': None}})).status, 200)
+        await self.edit_profile(agent={'name': '', 'avatar': None})
         self.assertEqual((await bridge_post('profile', dict(profile, sync_id=stale))).status, 200)
         conflict = await request
-        self.assertEqual(conflict.status, 409)
-        self.assertIn('manual edit was kept', await conflict.text())
-        saved = await self.get('/api/profile')
+        self.assertIn('manual edit was kept', conflict['message'])
+        saved = await self.profile()
         self.assertEqual(saved['agent'], {'name': '', 'avatar': None})
         self.assertEqual(saved['backends'][0]['name'], 'Fresh')
 
-        request = asyncio.create_task(self.post('/api/profile/sync', {'backend': 'hermes'}))
+        request = asyncio.create_task(self.request('sync_profile', via=sync_device, backend='hermes'))
         current = await claim_refresh()
         self.assertNotEqual(stale, current)
         self.assertEqual((await bridge_post('profile', dict(profile, sync_id=stale, name='Stale'))).status, 409)
-        self.assertEqual((await self.get('/api/profile'))['backends'][0]['name'], 'Fresh')
+        self.assertEqual((await self.profile())['backends'][0]['name'], 'Fresh')
         self.assertEqual((await bridge_post('profile', dict(profile, name='Unsolicited'))).status, 200)
-        self.assertEqual((await self.get('/api/profile'))['agent']['name'], 'Unsolicited')
+        self.assertEqual((await self.profile())['agent']['name'], 'Unsolicited')
         self.assertFalse(request.done())
         self.assertEqual((await bridge_post('profile', dict(profile, sync_id=current, name='Matched'))).status, 200)
         response = await request
-        self.assertEqual(response.status, 200)
-        self.assertEqual((await response.json())['agent']['name'], 'Matched')
+        self.assertEqual(response['profile']['agent']['name'], 'Matched')
 
-    async def test_native_upload_slots_reject_before_reading_body(self):
-        await self.login()
-        pending = []
-        try:
-            for expected in [b'100', b'100', b'503']:
-                reader, writer = await asyncio.open_connection('127.0.0.1', 8766)
-                pending.append((reader, writer))
-                writer.write(('POST /api/attachments HTTP/1.1\r\nHost: 127.0.0.1:8766\r\n'
-                              f'Authorization: {self.auth["Authorization"]}\r\n'
-                              'Content-Type: text/plain\r\nX-Rothcold-Filename: test.txt\r\n'
-                              'Expect: 100-continue\r\nContent-Length: 4\r\n\r\n').encode())
-                await writer.drain()
-                self.assertEqual((await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 2)).split(b' ')[1], expected)
-            for reader, writer in pending[:2]:
-                writer.write(b'test')
-                await writer.drain()
-                self.assertEqual((await asyncio.wait_for(reader.readline(), 2)).split(b' ')[1], b'201')
-            self.assertEqual((await self.upload('available.txt', b'test', 'text/plain')).status, 201)
-        finally:
-            for _, writer in pending:
-                writer.close()
-                await writer.wait_closed()
+    async def test_native_upload_slots_reject_before_reading_bytes(self):
+        session = await self.login()
+        holders = [self.connect_noise() for _ in range(2)]
+        for reader in holders:
+            await self.resume(session, via=reader)
+            result = await self.file_step('upload', via=reader, filename='pending.txt', purpose='turn', size=4)
+            self.assertEqual(result['type'], 'upload_ready')
+        await self.file_step('upload', filename='busy.txt', purpose='turn', size=4, error='busy')
+        for reader in holders:
+            self.assertEqual((await self.file_step('upload_cancel', via=reader))['type'], 'upload_cancelled')
+        self.assertEqual(list((self.data_dir/'attachments').iterdir()), [])
+        self.assertEqual((await self.upload('available.txt', b'test', 'text/plain'))['size'], 4)
 
-    async def test_web_attachment_transfer_slots_with_slow_clients(self):
-        upload_started = asyncio.Queue()
-        download_started = asyncio.Queue()
-        release_downloads = asyncio.Event()
-        cookie = 'a' * 64
-        packet = b'fixture'
-
-        async def upload(request):
-            # Observing the first byte before the client completes proves streaming.
-            await upload_started.put(await request.content.readexactly(1))
-            assert await request.content.read() == packet[1:]
-            return web.Response(body=b'{}', content_type='application/json', status=201)
-
-        async def media(request):
-            await download_started.put(True)
-            response = web.StreamResponse(headers={
-                'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename=test',
-            })
-            await response.prepare(request)
-            await release_downloads.wait()
-            await response.write(packet)
-            return response
-
-        fixture = web.Application()
-        async def status(_):
-            return web.json_response({'service': 'rothcold-agent', 'apiVersion': 1})
-
-        fixture.router.add_get('/api/status', status)
-        fixture.router.add_post('/api/attachments', upload)
-        fixture.router.add_get('/api/attachments/{id}', media)
-        runner = web.AppRunner(fixture)
-        await runner.setup()
-        self.addAsyncCleanup(runner.cleanup)
-        site = web.TCPSite(runner, '127.0.0.1', 0)
-        await site.start()
-        target = f'http://127.0.0.1:{runner.addresses[0][1]}'
-        await self.start_web(ROTHCOLD_API_URL=target)
-        base = await self.client.get(WEB+'/connection/check', headers={'X-Rothcold-Server': target})
-        scope = (await base.json())['mediaBase'].split('/')[-1]
-        web_cookie = f'rothcold_{scope}={cookie}'
-        pending = []
-        downloads = []
-        try:
-            for _ in range(2):
-                reader, writer = await asyncio.open_connection('127.0.0.1', 8765)
-                pending.append((reader, writer))
-                writer.write(('POST /api/attachments HTTP/1.1\r\nHost: 127.0.0.1:8765\r\n'
-                              f'Origin: {WEB}\r\nX-Rothcold-Server: {target}\r\nCookie: {web_cookie}\r\n'
-                              'Content-Type: text/plain\r\nX-Rothcold-Filename: test.txt\r\n'
-                              f'Content-Length: {len(packet)}\r\n\r\n').encode() + packet[:1])
-                await writer.drain()
-                self.assertEqual(await asyncio.wait_for(upload_started.get(), 2), packet[:1])
-            def upload_via_web():
-                return self.client.post(WEB+'/api/attachments', headers={
-                    'Origin': WEB, 'X-Rothcold-Server': target, 'Cookie': web_cookie,
-                    'Content-Type': 'text/plain', 'X-Rothcold-Filename': 'test.txt',
-                }, data=packet)
-
-            self.assertEqual((await upload_via_web()).status, 503)
-            for reader, writer in pending:
-                writer.write(packet[1:])
-                await writer.drain()
-                self.assertEqual((await asyncio.wait_for(reader.readline(), 2)).split(b' ')[1], b'201')
-            self.assertEqual((await upload_via_web()).status, 201)
-
-            media_url = f'{WEB}/api/media/{scope}/attachments/{uuid4()}'
-            for _ in range(8):
-                task = asyncio.create_task(self.client.get(media_url, headers={'Cookie': web_cookie}))
-                downloads.append(task)
-                await asyncio.wait_for(download_started.get(), 2)
-            self.assertEqual((await self.client.get(media_url, headers={'Cookie': web_cookie})).status, 503)
-            release_downloads.set()
-            for task in downloads:
-                self.assertEqual(await (await task).read(), packet)
-            self.assertEqual(await (await self.client.get(media_url, headers={'Cookie': web_cookie})).read(), packet)
-        finally:
-            release_downloads.set()
-            for task in downloads:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*downloads, return_exceptions=True)
-            for _, writer in pending:
-                writer.close()
-                await writer.wait_closed()
-
-    async def test_attachments_ranges_disk_safety_and_hermes_media_event(self):
+    async def test_attachments_media_disk_safety_and_hermes_media_event(self):
         await self.adapter.disconnect()
         await self.login()
         data = [
@@ -410,9 +360,7 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         ]
         items = []
         for index, (filename, content, mime) in enumerate(data):
-            response = await self.upload(filename, content, mime)
-            self.assertEqual(response.status, 201)
-            item = await response.json()
+            item = await self.upload(filename, content, mime)
             items.append(item)
             self.assertEqual(item['filename'], filename.split('/')[-1])
             self.assertEqual(item['mime'], mime if index < 3 else 'application/octet-stream')
@@ -421,33 +369,32 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.read_bytes(), content)
             self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
             self.assertEqual(stored.parent.stat().st_mode & 0o777, 0o700)
-            response = await self.client.get(ORIGIN + '/api/attachments/' + item['id'], headers=self.auth)
-            self.assertEqual(response.status, 200)
-            self.assertTrue(response.headers['Content-Disposition'].startswith('inline;' if index < 3 else 'attachment;'))
-            self.assertEqual(await response.read(), content)
-            response = await self.client.get(ORIGIN + '/api/attachments/' + item['id'] + '/download', headers=self.auth)
-            self.assertTrue(response.headers['Content-Disposition'].startswith('attachment;'))
+            self.assertEqual(item['kind'], ('image', 'video', 'audio', 'file', 'file')[index])
+            self.assertEqual(await self.download(item['id']), (item, content))
         target = ORIGIN + '/api/attachments/' + items[0]['id']
-        response = await self.client.get(target, headers={**self.auth, 'Range': 'bytes=1-4'})
-        self.assertEqual(response.status, 206)
-        self.assertEqual(response.headers['Content-Range'], f'bytes 1-4/{len(data[0][1])}')
-        self.assertEqual(await response.read(), data[0][1][1:5])
-        self.assertEqual((await self.client.get(target, headers={**self.auth, 'Range': 'bytes=999999-'})).status, 416)
-        self.assertEqual((await self.upload('profile.svg', data[-1][1], 'image/svg+xml', 'avatar')).status, 400)
-        self.assertEqual((await self.upload('big.png', b'0'*(5*1024*1024+1), 'image/png', 'avatar')).status, 413)
-        self.assertEqual((await self.post('/api/profile', {'owner': {'name': 'X'*65536}})).status, 413)
+        for suffix, headers in (('', {'Range': 'bytes=1-4'}), ('/download', {})):
+            self.assertEqual((await self.client.get(target + suffix, headers=headers)).status, 404)
+        await self.upload('profile.svg', data[-1][1], 'image/svg+xml', 'avatar', error='invalid')
+        await self.file_step('upload', filename='big.png', purpose='avatar', size=5*1024*1024+1, error='limit')
+        await self.request('update_profile', owner={'name': 'X'*81}, error='invalid')
+        self.assertTrue((await self.request('fixture_oversized_control'))['rejected'])
         adapter_path = ORIGIN + '/adapter/attachments/' + items[0]['id']
         self.assertEqual((await self.client.get(adapter_path, headers=self.bridge)).status, 404)
         chat = str(uuid4())
         payload = {'id': chat, 'attachments': [item['id'] for item in items], 'text': ''}
-        response = await self.post('/api/chats', payload)
-        self.assertEqual(response.status, 202)
-        self.assertEqual((await response.json())['title'], 'photo.png')
-        self.assertEqual((await self.post('/api/chats', payload)).status, 200)
-        self.assertEqual((await self.post(f'/api/chats/{chat}/turns', {**payload, 'id': str(uuid4())})).status, 409)
+        self.assertEqual((await self.start_thread(payload))['title'], 'photo.png')
+        await self.start_thread(payload, fresh=False)
+        await self.send_turn(chat, {**payload, 'id': str(uuid4())}, error='conflict')
         self.assertEqual((await self.client.get(adapter_path, headers=self.bridge)).status, 200)
-        self.assertEqual((await self.client.get(adapter_path, headers=self.auth)).status, 401)
-        self.assertEqual((await self.get(f'/api/chats/{chat}/turns'))[0]['attachments'], items)
+        # Range remains adapter-only for linked supported media.
+        response = await self.client.get(adapter_path, headers=self.bridge|{'Range': 'bytes=1-4'})
+        self.assertEqual(response.status, 206)
+        self.assertEqual(response.headers['Content-Range'], f'bytes 1-4/{len(data[0][1])}')
+        self.assertEqual(await response.read(), data[0][1][1:5])
+        response = await self.client.get(adapter_path, headers=self.bridge|{'Range': 'bytes=999999-'})
+        self.assertEqual(response.status, 416)
+        self.assertEqual((await self.client.get(adapter_path, headers=self.owner_headers)).status, 401)
+        self.assertEqual((await self.history(chat))[0]['attachments'], items)
 
         received = asyncio.get_running_loop().create_future()
 
@@ -467,22 +414,16 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
     async def test_adapter_retries_busy_attachment_download_before_single_admission(self):
         from unittest.mock import patch
 
-        await self.login()
+        session = await self.login()
         content = b'Attachment contents after slot release.\n'
-        file = await self.upload('retry.txt', content, 'text/plain')
-        self.assertEqual(file.status, 201)
-        item = await file.json()
-        # These unread responses are larger than the loopback socket buffers.
-        large = await self.upload('slow.bin', bytes(8 * 1024 * 1024), 'application/octet-stream')
-        self.assertEqual(large.status, 201)
-        large_id = (await large.json())['id']
+        item = await self.upload('retry.txt', content, 'text/plain')
+        held_item = await self.upload('held.bin', b'fixture', 'application/octet-stream')
         held = []
         busy = asyncio.Event()
         finish = asyncio.Event()
         admitted = asyncio.Event()
         downloads, admissions, events = [], [], []
         turn = str(uuid4())
-        history = f'/api/chats/{turn}/turns'
         client = self.adapter.client
         assert client is not None
         get, post = client.get, self.adapter.post
@@ -511,24 +452,22 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.adapter.set_message_handler(reply)
         try:
             for _ in range(8):
-                reader, writer = await asyncio.open_connection('127.0.0.1', 8766, limit=4096)
-                held.append(writer)
-                writer.write((f'GET /api/attachments/{large_id} HTTP/1.1\r\nHost: 127.0.0.1:8766\r\n'
-                              f'Authorization: {self.auth["Authorization"]}\r\n\r\n').encode())
-                await writer.drain()
-                header = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 3)
-                self.assertEqual(header.split(b' ')[1], b'200')
+                holder = self.connect_noise()
+                await self.resume(session, via=holder)
+                result = await self.file_step('download', via=holder, id=held_item['id'])
+                self.assertEqual(result['type'], 'download_start')
+                held.append(holder)
+            await self.file_step('download', id=held_item['id'], error='busy')
             with (patch.object(client, 'get', side_effect=observe_download),
                   patch.object(self.adapter, 'post', side_effect=observe_admission)):
-                queued = await self.post('/api/chats', {'id': turn, 'attachments': [item['id']]})
-                self.assertEqual(queued.status, 202)
+                await self.start_thread({'id': turn, 'attachments': [item['id']]})
                 await asyncio.wait_for(busy.wait(), 5)
-                self.assertEqual((await self.get(history))[0]['state'], 'reserved')
+                self.assertEqual((await self.history(turn))[0]['state'], 'reserved')
                 self.assertEqual(events, [])
-                for writer in held:
-                    writer.transport.abort()
+                for holder in held:
+                    self.assertEqual((await self.file_step('download_cancel', via=holder))['type'], 'download_cancelled')
                 await asyncio.wait_for(admitted.wait(), 5)
-                self.assertEqual((await self.get(history))[0]['state'], 'accepted')
+                self.assertEqual((await self.history(turn))[0]['state'], 'accepted')
                 self.assertEqual(admissions, [True])
                 self.assertEqual(downloads[0], 503)
                 self.assertEqual(downloads[-1], 200)
@@ -537,28 +476,26 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(Path(events[0].media_urls[0]).read_bytes(), content)
                 finish.set()
                 async with asyncio.timeout(5):
-                    while (await self.get(history))[0]['state'] != 'answered':
+                    while (await self.history(turn))[0]['state'] != 'answered':
                         await asyncio.sleep(.02)
         finally:
             finish.set()
-            for writer in held:
-                writer.transport.abort()
-                await writer.wait_closed()
+
 
     async def test_move_offline_keeps_thread_and_queue_ids(self):
         await self.adapter.disconnect()
         await self.login()
-        to = (await (await self.post('/api/channels', {'name': 'Research'})).json())['id']
+        to = (await self.request('create_category', name='Research'))['id']
         chat = str(uuid4())
-        request = {'id': chat, 'text': 'Pending'}
-        self.assertEqual((await self.post('/api/chats', request)).status, 202)
-        self.assertEqual((await self.post(f'/api/chats/{chat}/move', {'channel': 'missing'})).status, 404)
-        self.assertEqual((await self.post('/api/chats/missing/move', {'channel': to})).status, 404)
-        response = await self.post(f'/api/chats/{chat}/move', {'channel': to})
-        self.assertEqual(await response.json(), {'id': chat, 'channel': to})
-        self.assertEqual(await self.get('/api/chats'), [{'id':chat, 'title':'Pending', 'channel':to}])
-        self.assertEqual((await self.post('/api/chats', request)).status, 200)
-        self.assertEqual((await self.get(f'/api/chats/{chat}/turns'))[0]['id'], chat)
+        message = {'id': chat, 'text': 'Pending'}
+        await self.start_thread(message)
+        await self.request('move_thread', id=chat, channel='missing', error='missing')
+        await self.request('move_thread', id='missing', channel=to, error='missing')
+        self.assertEqual(await self.request('move_thread', id=chat, channel=to),
+                         {'type':'thread_moved', 'id': chat, 'channel': to})
+        self.assertEqual(await self.threads(), [{'id':chat, 'title':'Pending', 'channel':to}])
+        await self.start_thread(message, fresh=False)
+        self.assertEqual((await self.history(chat))[0]['id'], chat)
 
     async def test_close_before_final(self):
         calls, release = [], asyncio.Event()
@@ -569,15 +506,16 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             return 'One plain-text answer.'
 
         self.adapter.set_message_handler(ordinary_handler)
-        await self.login()
+        session = await self.login()
+        duplicate = self.connect_noise()
+        await self.resume(session, via=duplicate)
         req = {'id':str(uuid4()), 'text':'Ordinary message'}
-        replies = await asyncio.gather(self.post('/api/chats', req), self.post('/api/chats', req))
-        first, replay = [await r.json() for r in replies]
+        first, replay = await asyncio.gather(self.start_thread(req, fresh=None),
+                                             self.start_thread(req, via=duplicate, fresh=None))
+        self.assertCountEqual([first.pop('fresh'), replay.pop('fresh')], [False, True])
         self.assertEqual(first, replay)
         chat = first['id']
-        path = f'/api/chats/{chat}/turns'
-        self.assertEqual(sorted(r.status for r in replies), [200,202])
-        self.assertEqual((await self.post(path, dict(req,text='Other'))).status, 409)
+        await self.send_turn(chat, dict(req,text='Other'), error='conflict')
         async with asyncio.timeout(5):
             while not calls:
                 await asyncio.sleep(.05)
@@ -590,219 +528,48 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             chat, 'Tests passed.', metadata={'_interim_send': True, 'reply_to_message_id': req['id']})
         self.assertTrue(commentary.success and commentary.message_id)
         expected_updates = [
-            {'id': progress.message_id, 'kind': 'progress', 'text': '💻 terminal\ncargo test\n📖 Reading src/main.rs'},
-            {'id': commentary.message_id, 'kind': 'commentary', 'text': 'Tests passed.'},
+            {'id': progress.message_id, 'kind': 'progress', 'text': '💻 terminal\ncargo test\n📖 Reading src/main.rs', 'choices': []},
+            {'id': commentary.message_id, 'kind': 'commentary', 'text': 'Tests passed.', 'choices': []},
         ]
-        self.assertEqual((await self.get(path))[0]['updates'], expected_updates)
-        self.assertEqual([row for row in await self.get('/api/notifications') if row['chat'] == chat], [])
-        await self.client.close()
+        self.assertEqual((await self.history(chat))[0]['updates'], expected_updates)
+        self.assertEqual([row for row in await self.pages('inbox') if row['chat'] == chat], [])
+        self.device.close()
+        duplicate.close()
         release.set()
         await asyncio.wait_for(asyncio.gather(*self.adapter._background_tasks), 5)
         self.assertEqual(len(calls), 1)
         event = calls[0]
         self.assertEqual((event.message_id,event.source.message_id,event.source.thread_id,event.source.chat_id,
                           event.source.user_id), (req['id'],req['id'],None,chat,'owner'))
-        self.client = ClientSession()
-        self.addAsyncCleanup(self.client.close)
-        await self.login()
+        self.device = self.connect_noise()
+        await self.resume(session)
         for _ in range(2):
-            rows = await (await self.client.get(ORIGIN+path,headers=self.auth)).json()
+            rows = await self.history(chat)
             self.assertEqual(rows,[dict(req,state='answered',answer='One plain-text answer.',updates=expected_updates)])
             result, _ = await self.adapter.send_final_ledgered(event, 'key', rows[0]['answer'], {}, reply_to=req['id'])
             self.assertEqual(result.message_id,'reply:'+req['id'])
         self.assertFalse((await self.adapter.edit_message(chat, progress.message_id, 'late edit')).success)
-        inbox = ORIGIN+'/api/notifications'
         event_row = {'request':req['id'], 'chat':chat, 'channel':'general', 'unread':1,
                      'title':'Ordinary message', 'preview':'One plain-text answer.'}
         async def entries():
-            return [row for row in await (await self.client.get(inbox, headers=self.auth)).json() if row['chat']==chat]
+            return [row for row in await self.pages('inbox') if row['chat']==chat]
         for _ in range(2):
             self.assertEqual(await entries(), [event_row])
-        self.assertEqual((await self.post('/api/chats/'+chat+'/read', {})).status,200)
-        self.assertEqual((await self.post(path,req)).status,200)
+        await self.request('read_thread', chat=chat)
+        await self.send_turn(chat, req, fresh=False)
         result, _ = await self.adapter.send_final_ledgered(event,'key','One plain-text answer.',{},reply_to=req['id'])
         self.assertEqual(result.message_id, 'reply:'+req['id'])
         self.assertEqual(await entries(), [dict(event_row,unread=0)])
         self.assertEqual(len(calls), 1)
 
     async def wait_for_fixture_approval(self, chat):
-        from tools.approval_gateway_wait import _await_gateway_decision
+        from tools.approval_gateway_wait import _await_gateway_decision  # pyright: ignore[reportMissingImports]
 
         loop = asyncio.get_running_loop()
         def notify(data):
             card = self.adapter.send_exec_approval(chat, data['command'], chat, request_id=data['request_id'])
             assert asyncio.run_coroutine_threadsafe(card, loop).result(4).success
         return await asyncio.to_thread(_await_gateway_decision, chat, notify, {'command':'echo fixture'})
-
-    @unittest.skipUnless(os.environ.get('PLAYWRIGHT_DIR'), 'No local Playwright + Chromium')
-    async def test_browser_profiles_attachments_and_moves(self):
-        await self.adapter.disconnect()
-        initial_profile = 'Workspace Hermes'
-        self.profile_fixture(initial_profile, sample_png())
-        await self.login()
-        (self.data_dir/'sample.png').write_bytes(sample_png((231, 198, 143)))
-        (self.data_dir/'sample.wav').write_bytes(sample_wav())
-        target = (await (await self.post('/api/channels', {'name':'Research'})).json())['id']
-        remote = (await (await self.post('/api/channels', {'name':'Archive'})).json())['id']
-        # Populate only the disposable Research directory so browser Back can restore its scroll.
-        with closing(sqlite3.connect(self.data_dir/'history.sqlite3')) as db, db:
-            for index in range(24):
-                chat = str(uuid4())
-                db.execute('INSERT INTO chats(id,title) VALUES(?,?)', (chat, f'Research fixture {index+1}'))
-                db.execute('INSERT INTO placement(chat,channel,original_channel) VALUES(?,?,?)', (chat, target, target))
-        await self.start_web()
-
-        async def reply(event):
-            await self.adapter.send(event.source.chat_id, 'Reading the attachments.',
-                                    metadata={'_interim_send': True, 'reply_to_message_id': event.message_id})
-            return 'The attachments reached the gateway.'
-
-        self.adapter.set_message_handler(reply)
-        p = await asyncio.create_subprocess_exec(os.environ['NODE'], ROOT/'tests/browser.cjs', '--features',
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, env=dict(os.environ,
-                TMPDIR=BROWSER_TMP, FEATURE_DATA=str(self.data_dir), MOVE_OFFLINE=target, MOVE_ONLINE=remote))
-        try:
-            assert p.stdout is not None and p.stdin is not None
-            self.assertEqual(await asyncio.wait_for(p.stdout.readline(), 55), b'offline-moved\n')
-            self.assertTrue(await self.adapter.connect())
-            await self.await_profile(initial_profile)
-            p.stdin.write(b'online\n')
-            await p.stdin.drain()
-            self.assertEqual(await asyncio.wait_for(p.stdout.readline(), 40), b'refresh-profile\n')
-            set_fixture_profile('Refreshed Workspace Hermes', sample_png((133, 185, 154)))
-            p.stdin.write(b'profile-ready\n')
-            await p.stdin.drain()
-            p.stdin.close()
-            self.assertEqual(await asyncio.wait_for(p.wait(), 60), 0)
-        finally:
-            if p.returncode is None:
-                p.kill()
-                await p.wait()
-
-    @unittest.skipUnless(os.environ.get('PLAYWRIGHT_DIR'), 'No local Playwright + Chromium')
-    async def test_browser(self):
-        release, calls = asyncio.Event(), []
-
-        async def reply(event):
-            calls.append(event.message_id)
-            chat = event.source.chat_id
-            if event.text != 'What should I read first?':
-                return (
-                    '## Notes for the working draft\n\n'
-                    'The **main argument** belongs in the opening paragraph. Keep the edition notes separate so they can be checked against the source.\n\n'
-                    '### Pass through the sources\n\n'
-                    '1. Compare page references in the two editions.\n'
-                    '2. Move quotations into `reading-notes.md`.\n'
-                    '3. Mark uncertain references for a second pass.\n\n'
-                    '> Keep source notes separate from interpretation.\n\n'
-                    '| Section | Next step |\n| --- | --- |\n| Introduction | Check the scope |\n| References | Verify page numbers |'
-                )
-            prog = await self.adapter.send(chat, '💻 terminal\ncargo test')
-            assert prog.success and prog.message_id
-            await self.adapter.edit_message(chat, prog.message_id, '💻 terminal\ncargo test\n📖 Reading src/main.rs')
-            await self.adapter.send(
-                chat,
-                'Checks passed. Writing **summary** now.',
-                metadata={'_interim_send': True, 'reply_to_message_id': event.message_id},
-            )
-            decision = await self.wait_for_fixture_approval(chat)
-            assert decision['choice'] == 'session'
-            await release.wait()
-            return (
-                '## Reading plan\n\n'
-                'Start with <chapter one> and **read** `Cargo.toml`.\n\n'
-                '```rust\nfn main() {}\n```\n\n'
-                '| Item | Status |\n| --- | --- |\n| build | ok |'
-            )
-
-        self.adapter.set_message_handler(reply)
-        await self.start_web()
-        p = await asyncio.create_subprocess_exec(os.environ['NODE'], str(ROOT/'tests/browser.cjs'),
-                                                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                                                 env=dict(os.environ, TMPDIR=BROWSER_TMP))
-        try:
-            assert p.stdout is not None and p.stdin is not None
-            self.assertEqual(await asyncio.wait_for(p.stdout.readline(), 45), b'viewing\n')
-            release.set()
-            await asyncio.wait_for(asyncio.gather(*self.adapter._background_tasks), 5)
-            p.stdin.write(b'final\n')
-            await p.stdin.drain()
-            p.stdin.close()
-            self.assertEqual(await asyncio.wait_for(p.wait(), 75), 0)
-            self.assertEqual(len(calls), 4)
-        finally:
-            release.set()
-            if p.returncode is None:
-                p.kill()
-                await p.wait()
-
-    @unittest.skipUnless(os.environ.get('PLAYWRIGHT_DIR'), 'No local Playwright + Chromium')
-    async def test_browser_archive_and_inbox_previews(self):
-        async def handler(event):
-            return {'Park this thread': '## First archive reply',
-                    'Reply again': '**Second archive reply**'}.get(event.text, 'Fixture delivered')
-
-        self.adapter.set_message_handler(handler)
-        await self.start_web()
-        browser = await asyncio.create_subprocess_exec(
-            os.environ['NODE'], ROOT/'tests/browser.cjs', '--archive',
-            env=dict(os.environ, TMPDIR=BROWSER_TMP))
-        try:
-            self.assertEqual(await asyncio.wait_for(browser.wait(), 75), 0)
-        finally:
-            if browser.returncode is None:
-                browser.kill()
-                await browser.wait()
-
-    async def test_browser_offline(self):
-        await self.adapter.disconnect()
-        alternate = 'http://127.0.0.1:8770'
-        alternate_owner = secrets.token_urlsafe(32)
-        alternate_db = PROFILE.parent/'alternate-data'
-        isolated = await asyncio.create_subprocess_exec(
-            'bwrap', '--unshare-net', '--die-with-parent', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
-            sys.executable, '-B', ROOT/'tests/http_ingress.py', stdout=asyncio.subprocess.PIPE,
-            env=dict(os.environ, ROTHCOLD_DATA_DIR=str(alternate_db), ROTHCOLD_AGENT_OWNER_TOKEN=alternate_owner,
-                     ROTHCOLD_AGENT_ADAPTER_TOKEN=secrets.token_urlsafe(32)))
-
-        async def stop_alternate():
-            if isolated.returncode is None:
-                isolated.terminate()
-            await isolated.wait()
-
-        self.addAsyncCleanup(stop_alternate)
-        assert isolated.stdout is not None
-        self.assertEqual(await asyncio.wait_for(isolated.stdout.readline(), 5), b'Alternate test API ready\n')
-        alternate_client = ClientSession(connector=UnixConnector(path=str(PROFILE.parent/'alternate.sock')),
-                                         cookie_jar=DummyCookieJar())
-        self.addAsyncCleanup(alternate_client.close)
-
-        async def alternate_api(request):
-            return await relay(alternate_client, request, alternate, '127.0.0.1:8770')
-
-        fixture = web.Application()
-        fixture.router.add_route('*', '/{path:.*}', alternate_api)
-        runner = web.AppRunner(fixture)
-        await runner.setup()
-        self.addAsyncCleanup(runner.cleanup)
-        await web.TCPSite(runner, '127.0.0.1', 8770).start()
-        config = self.data_dir/'web.json'
-        config.write_text(f'{{"trustedApis":["{alternate}"]}}')
-        await self.start_web(ROTHCOLD_WEB_CONFIG=str(config))
-        p = await asyncio.create_subprocess_exec(os.environ['NODE'], str(ROOT/'tests/browser.cjs'), '--offline',
-                env=dict(os.environ, TMPDIR=BROWSER_TMP, ALTERNATE_OWNER_TOKEN=alternate_owner))
-        try:
-            self.assertEqual(await asyncio.wait_for(p.wait(), 75), 0)
-            with closing(sqlite3.connect(alternate_db/'history.sqlite3')) as db:
-                self.assertEqual(db.execute('SELECT text FROM turns').fetchall(), [('Only on server B',)])
-                self.assertEqual(db.execute('SELECT name FROM device_sessions').fetchall(), [('Server B browser',)])
-            with closing(sqlite3.connect(self.data_dir/'history.sqlite3')) as db:
-                self.assertFalse(db.execute("SELECT 1 FROM turns WHERE text='Only on server B'").fetchone())
-                self.assertEqual(db.execute('SELECT name FROM device_sessions').fetchall(), [])
-        finally:
-            if p.returncode is None:
-                p.kill()
-                await p.wait()
 
     async def test_live_session_approval(self):
         from unittest.mock import patch
@@ -818,48 +585,47 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.adapter.set_message_handler(handler)
         await self.login()
         rid = str(uuid4())
-        path = f'/api/chats/{rid}/turns'
         with patch('tools.approval_context._get_approval_timeout', return_value=15):
-            await self.post('/api/chats', {'id':rid, 'text':'Fixture approval'})
-            await self.post(path, {'id':str(uuid4()), 'text':'Next job'})
+            await self.start_thread({'id':rid, 'text':'Fixture approval'})
+            await self.send_turn(rid, {'id':str(uuid4()), 'text':'Next job'})
             async with asyncio.timeout(8):
-                while not (cards := [u for u in (await self.get(path))[0]['updates'] if u.get('choices')]):
+                while not (cards := [u for u in (await self.history(rid))[0]['updates'] if u.get('choices')]):
                     await asyncio.sleep(.05)
             self.assertEqual(calls, ['Fixture approval'])
-            self.assertEqual((await self.post(f'/api/chats/{rid}/archive', {'archived': True})).status, 200)
-            answer = {'id':str(uuid4()), 'text':'/approve session', 'approval':cards[0]['id']}
-            self.assertEqual((await self.post('/api/chats/other/turns', answer)).status,409)
-            self.assertEqual((await self.post(path, dict(answer, text='/approve always'))).status,400)
-            self.assertEqual((await self.post(path, answer)).status,202)
-            self.assertEqual((await self.post(path, answer)).status,409)
+            await self.request('archive_thread', id=rid, archived=True)
+            prompt = cards[0]['id']
+            await self.request('decide_approval', chat='other', id=prompt, choice='session', error='conflict')
+            await self.send_turn(rid, {'id':str(uuid4()), 'text':'/approve always'}, error='conflict')
+            self.assertIn('session', cards[0]['choices'])
+            await self.request('decide_approval', chat=rid, id=prompt, choice='session')
+            await self.request('decide_approval', chat=rid, id=prompt, choice='session', error='conflict')
             async with asyncio.timeout(8):
-                while (rows := await self.get(path))[-1]['state'] != 'answered':
+                while (rows := await self.history(rid))[-1]['state'] != 'answered':
                     await asyncio.sleep(.05)
             self.assertEqual([r['answer'] for r in rows], ['Decision: session','Next task done.'])
-            self.assertEqual(len(await self.get('/api/notifications')),2)
-            self.assertEqual((await self.post(path, answer)).status,409)
+            self.assertEqual(len(await self.pages('inbox')),2)
+            await self.request('decide_approval', chat=rid, id=prompt, choice='session', error='conflict')
 
     async def test_archive_is_reversible_without_changing_queue_or_inbox_correlation(self):
         await self.adapter.disconnect()
-        directory_path = '/api/directory'
-        self.assertEqual((await self.client.get(ORIGIN + directory_path)).status, 401)
+        await self.request('categories', include_archived=True, error='unauthorized')
+        await self.request('threads', include_archived=True, error='unauthorized')
         await self.login()
-        category = await (await self.post('/api/channels', {'name': 'Research'})).json()
+        category = await self.request('create_category', name='Research')
         cat = category['id']
-        for invalid, status in [('  ', 400), ('GENERAL', 409)]:
-            self.assertEqual((await self.post(f'/api/channels/{cat}/rename', {'name': invalid})).status, status)
-        self.assertEqual((await self.post('/api/channels/general/rename', {'name': 'Home'})).status, 200)
-        self.assertEqual((await self.post('/api/channels/general/archive', {'archived': True})).status, 409)
-        self.assertEqual((await self.post(f'/api/channels/{cat}/rename', {'name': ' Notes '})).status, 200)
+        for invalid, error in [('  ', 'invalid'), ('GENERAL', 'conflict')]:
+            await self.request('rename_category', id=cat, name=invalid, error=error)
+        await self.request('rename_category', id='general', name='Home')
+        await self.request('archive_category', id='general', archived=True, error='conflict')
+        self.assertEqual((await self.request('rename_category', id=cat, name=' Notes '))['name'], 'Notes')
         a, b, queued, push, general = (str(uuid4()) for _ in range(5))
-        first = {'id': a, 'channel': cat, 'text': 'A thread'}
-        path = f'/api/chats/{a}/turns'
+        first = {'id': a, 'text': 'A thread'}
         next_turn = {'id': queued, 'text': 'Already queued'}
-        self.assertEqual((await self.post('/api/chats', first)).status, 202)
-        self.assertEqual((await self.post(path, next_turn)).status, 202)
-        self.assertEqual((await self.post('/api/chats', {'id': b, 'channel': cat, 'text': 'B thread'})).status, 202)
-        defaulted = await self.post('/api/chats', {'id': general, 'text': 'No category supplied'})
-        self.assertEqual((defaulted.status, (await defaulted.json())['channel']), (202, 'general'))
+        await self.start_thread(first, channel=cat)
+        await self.send_turn(a, next_turn)
+        await self.start_thread({'id': b, 'text': 'B thread'}, channel=cat)
+        general_thread = await self.start_thread({'id':general, 'text':'General opener'})
+        self.assertEqual(general_thread['channel'], 'general')
 
         async def adapter(route, payload):
             return await self.client.post(ORIGIN + '/adapter/' + route, headers=self.bridge, json=payload)
@@ -867,62 +633,62 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await (await adapter('claim', {})).json())['id'], a)
         self.assertEqual((await adapter('admission', {'id': a, 'accepted': True})).status, 200)
         self.assertEqual((await adapter('connect', {})).status, 200)
-        self.assertEqual((await self.get(path))[0]['state'], 'unknown')
-        self.assertEqual((await self.post(f'/api/chats/{a}/archive', {'archived': True})).status, 200)
-        self.assertEqual((await self.post(f'/api/channels/{cat}/archive', {'archived': True})).status, 200)
-        self.assertEqual(await self.get('/api/channels'), [{'id': 'general', 'name': 'Home'}])
-        self.assertEqual([c['id'] for c in await self.get('/api/chats')], [general])
-        directory = await self.get(directory_path)
-        self.assertEqual([(c['name'], c['archived']) for c in directory['channels']], [('Home', 0), ('Notes', 1)])
-        self.assertEqual({c['id']: c['archived'] for c in directory['chats']}, {general: 0, b: 0, a: 1})
-        self.assertEqual((await self.post('/api/chats', first)).status, 200)
-        self.assertEqual((await self.post(path, next_turn)).status, 200)
-        self.assertEqual((await self.post(path, dict(next_turn, text='Different input'))).status, 409)
-        self.assertEqual((await self.post('/api/chats', dict(first, id=str(uuid4())))).status, 409)
-        self.assertEqual((await self.post(f'/api/chats/{b}/turns', {'id': str(uuid4()), 'text': 'New input'})).status, 409)
-        self.assertEqual((await self.post(f'/api/chats/{b}/move', {'channel': 'general'})).status, 409)
-        self.assertEqual((await self.post(f'/api/chats/{general}/move', {'channel': cat})).status, 409)
-        self.assertEqual((await self.post(f'{path}/{a}/stop-waiting', {})).status, 200)
+        self.assertEqual((await self.history(a))[0]['state'], 'unknown')
+        await self.request('archive_thread', id=a, archived=True)
+        await self.request('archive_category', id=cat, archived=True)
+        self.assertEqual(await self.pages('categories', include_archived=False),
+                         [{'id':'general', 'name':'Home', 'archived':False}])
+        self.assertEqual([c['id'] for c in await self.threads()], [general])
+        categories = await self.pages('categories', include_archived=True)
+        self.assertEqual([(c['name'], c['archived']) for c in categories], [('Home', False), ('Notes', True)])
+        threads = await self.pages('threads', include_archived=True)
+        self.assertEqual({c['id']: c['archived'] for c in threads}, {general: False, b: False, a: True})
+        await self.start_thread(first, channel=cat, fresh=False)
+        await self.send_turn(a, next_turn, fresh=False)
+        await self.send_turn(a, dict(next_turn, text='Different input'), error='conflict')
+        await self.start_thread(dict(first, id=str(uuid4())), channel=cat, error='conflict')
+        await self.send_turn(b, {'id':str(uuid4()), 'text':'New input'}, error='conflict')
+        await self.request('move_thread', id=b, channel='general', error='conflict')
+        await self.request('move_thread', id=general, channel=cat, error='conflict')
+        await self.request('release_turn', chat=a, id=a)
         self.assertEqual((await (await adapter('claim', {})).json())['id'], queued)
         self.assertEqual((await adapter('final', {'chat': a, 'id': a, 'text': '## Late **reply**'})).status, 200)
-        self.assertEqual((await self.post(f'/api/chats/{a}/read/{a}', {})).status, 200)
+        await self.request('read_reply', chat=a, id=a)
         self.assertEqual((await adapter('final', {'chat': a, 'id': queued, 'text': 'Second reply'})).status, 200)
         body = f"**{'云' * 139}👩🏽‍🚀** End"
         for _ in range(2):
             self.assertEqual((await adapter('push', {'chat': a, 'id': push, 'text': body})).status, 200)
         for _ in range(2):
-            notices = await self.get('/api/notifications')
+            notices = await self.pages('inbox')
             self.assertEqual([(n['request'], n['title'], n['preview'], n['unread']) for n in notices],
                              [(push, 'A thread', '云' * 139 + '👩🏽‍🚀…', 1),
                               (queued, 'A thread', 'Second reply', 1), (a, 'A thread', 'Late reply', 0)])
-        self.assertEqual([(t['state'], t['answer']) for t in await self.get(path)],
+        self.assertEqual([(t['state'], t['answer']) for t in await self.history(a)],
                          [('released', '## Late **reply**'), ('answered', 'Second reply'), ('answered', body)])
 
-        self.assertEqual((await self.post(f'/api/channels/{cat}/archive', {'archived': False})).status, 200)
-        self.assertEqual([c['id'] for c in await self.get('/api/chats')], [general, b])
+        await self.request('archive_category', id=cat, archived=False)
+        self.assertEqual([c['id'] for c in await self.threads()], [general, b])
         new_turn = {'id': str(uuid4()), 'text': 'After restore'}
-        self.assertEqual((await self.post(path, new_turn)).status, 409)
-        self.assertEqual((await self.post(f'/api/chats/{a}/archive', {'archived': False})).status, 200)
-        self.assertEqual((await self.post(path, new_turn)).status, 202)
+        await self.send_turn(a, new_turn, error='conflict')
+        await self.request('archive_thread', id=a, archived=False)
+        await self.send_turn(a, new_turn)
 
     async def test_approval_is_not_a_fifo_turn(self):
         await self.adapter.disconnect()
         await self.login()
         rid = str(uuid4())
-        path = f'/api/chats/{rid}/turns'
-        await self.post('/api/chats', {'id': rid, 'text': 'Needs a decision'})
+        await self.start_thread({'id': rid, 'text': 'Needs a decision'})
         await self.client.post(ORIGIN+'/adapter/claim', headers=self.bridge, json={})
         await self.client.post(ORIGIN+'/adapter/admission', headers=self.bridge, json={'id':rid, 'accepted':True})
-        result = await self.post(path, {'id':str(uuid4()), 'text':'/approve session'})
-        self.assertEqual(result.status, 409, 'An unbound approval must not become a queued turn')
-        self.assertEqual(len(await self.get(path)), 1)
+        await self.send_turn(rid, {'id':str(uuid4()), 'text':'/approve session'}, error='conflict')
+        self.assertEqual(len(await self.history(rid)), 1)
 
     async def test_interrupted_admission(self):
         chat = str(uuid4())
         req = {'id':chat, 'text':'Uncertain admission'}
         await self.adapter.disconnect()
         await self.login()
-        self.assertEqual((await self.post('/api/chats', req)).status, 202)
+        await self.start_thread(req)
         claimed = await self.client.post(ORIGIN+'/adapter/claim', headers=self.bridge, json={})
         self.assertEqual((await claimed.json())['id'], chat)
         await self.adapter.connect(is_reconnect=True)
@@ -932,14 +698,12 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             calls.append(event.message_id)
 
         self.adapter.set_message_handler(unexpected_call)
-        await self.login()
-        path = f'/api/chats/{chat}/turns'
-        self.assertEqual((await self.post('/api/chats', req)).status, 200)
-        self.assertEqual((await self.post(path, req)).status, 200)
+        await self.start_thread(req, fresh=False)
+        await self.send_turn(chat, req, fresh=False)
         for meta in ({}, {'_interim_send':True}, {'thread_id':chat}, {'notify':True}):
             self.assertFalse((await self.adapter.send(chat, 'Unverified', metadata=meta)).success)
         async with asyncio.timeout(5):
-            while (rows := await self.get(path))[0]['state'] == 'reserved':
+            while (rows := await self.history(chat))[0]['state'] == 'reserved':
                 await asyncio.sleep(.05)
         self.assertEqual(rows, [dict(req, state='unknown', answer=None, updates=[])])
         self.assertEqual(calls, [])
@@ -947,36 +711,33 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
     async def test_rename_offline_thread(self):
         await self.adapter.disconnect()
         chat = str(uuid4())
-        req = {'id': chat, 'text': 'Original message'}
-        path = f'/api/chats/{chat}/rename'
-        data = {'title': 'Renamed'}
-        self.assertEqual((await self.post(path, data)).status, 401)
-        self.assertEqual((await self.client.post(ORIGIN + path, json=data, headers=self.bridge_bearer)).status, 401)
+        message = {'id': chat, 'text': 'Original message'}
+        await self.request('rename_thread', id=chat, title='Renamed', error='unauthorized')
+        await self.request('login_native', owner_token=self.bridge_token, name='Adapter authority', error='unauthorized')
         await self.login()
-        self.assertEqual((await self.post(path, data)).status, 404)
-        self.assertEqual((await self.post('/api/chats', req)).status, 202)
-        for invalid in (' ', None, 'a\nb', '📖' * 81):
-            self.assertEqual((await self.post(path, {'title': invalid})).status, 400)
+        await self.request('rename_thread', id=chat, title='Renamed', error='missing')
+        await self.start_thread(message)
+        for invalid in (' ', 'a\nb', '📖' * 81):
+            await self.request('rename_thread', id=chat, title=invalid, error='invalid')
         for name in ('  Renamed  ', '📖' * 80):
-            response = await self.post(path, {'title': name})
-            self.assertEqual(response.status, 200)
-            self.assertEqual(await response.json(), {'title': name.strip()})
+            self.assertEqual(await self.request('rename_thread', id=chat, title=name),
+                             {'type':'thread_renamed', 'title': name.strip()})
         receipt = {'id': chat, 'title': '📖' * 80, 'channel': 'general'}
-        self.assertEqual(await self.get('/api/chats'), [receipt])
-        self.assertEqual(await (await self.post('/api/chats', req)).json(), receipt)
-        self.assertEqual(await self.get(f'/api/chats/{chat}/turns'),
-                         [dict(req, state='queued', answer=None, updates=[])])
-        self.assertEqual(await self.get('/api/notifications'), [])
+        self.assertEqual(await self.threads(), [receipt])
+        response = await self.start_thread(message, fresh=False)
+        self.assertEqual({k: response[k] for k in receipt}, receipt)
+        self.assertEqual(await self.history(chat), [dict(message, state='queued', answer=None, updates=[])])
+        self.assertEqual(await self.pages('inbox'), [])
 
     async def test_thread_title_adapter_boundary_and_single_use(self):
         await self.adapter.disconnect()
         await self.login()
         chat = str(uuid4())
         opener = {'id': chat, 'text': 'First title prompt'}
-        self.assertEqual((await self.post('/api/chats', opener)).status, 202)
+        await self.start_thread(opener)
         claim_path = ORIGIN + '/adapter/title-claim'
         result_path = ORIGIN + '/adapter/title-result'
-        self.assertEqual((await self.post('/adapter/title-claim', {})).status, 401)
+        self.assertEqual((await self.client.post(claim_path, json={}, headers=self.owner_headers)).status, 401)
         self.assertEqual((await self.client.post(claim_path, json={}, headers=self.bridge_bearer)).status, 403)
         async with self.client.post(claim_path, json={}, headers=self.bridge) as response:
             self.assertEqual(response.status, 200)
@@ -990,45 +751,43 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
             async with self.client.post(result_path, json={'claim': job['claim'], 'title': title},
                                         headers=self.bridge) as response:
                 self.assertEqual(response.status, 200)
-        self.assertEqual(await self.get('/api/chats'), [{'id': chat, 'title': 'Semantic title', 'channel': 'general'}])
-        self.assertEqual(await self.get(f'/api/chats/{chat}/turns'),
+        self.assertEqual(await self.threads(), [{'id': chat, 'title': 'Semantic title', 'channel': 'general'}])
+        self.assertEqual(await self.history(chat),
                          [dict(opener, state='queued', answer=None, updates=[])])
-        self.assertEqual(await self.get('/api/notifications'), [])
+        self.assertEqual(await self.pages('inbox'), [])
 
     async def test_channels(self):
         await self.login()
-        response = await self.post('/api/channels', {'name': '  Research  '})
-        self.assertEqual(response.status, 201)
-        channel = (await response.json())['id']
-        listed = await (await self.client.get(ORIGIN+'/api/channels', headers=self.auth)).json()
-        self.assertIn({'id':channel, 'name':'Research'}, listed)
-        self.assertEqual((await self.post('/api/channels', {'name': 'research'})).status, 409)
-        self.assertEqual((await self.post('/api/channels', {'name': ' '})).status, 400)
+        channel = (await self.request('create_category', name='  Research  '))['id']
+        self.assertIn({'id':channel, 'name':'Research', 'archived':False},
+                      await self.pages('categories', include_archived=False))
+        await self.request('create_category', name='research', error='conflict')
+        await self.request('create_category', name=' ', error='invalid')
         async def reply(event):
             return 'Noted.'
         self.adapter.set_message_handler(reply)
-        msg = {'id':str(uuid4()), 'text':'  Task\n' + '读' * 100, 'channel':channel}
-        before = await self.get('/api/chats')
-        self.assertEqual((await self.post('/api/chats', {'title':'Task'})).status, 400)
-        self.assertEqual((await self.post('/api/chats', dict(msg,text=' '))).status, 400)
-        self.assertEqual((await self.post('/api/chats', dict(msg,channel='missing'))).status, 404)
-        self.assertEqual(await self.get('/api/chats'), before)
-        response = await self.post('/api/chats', msg)
-        self.assertEqual(response.status, 202)
-        chat = (await response.json())['id']
-        self.assertIn({'id':chat,'title':'Task ' + '读' * 75,'channel':channel}, await self.get('/api/chats'))
-        self.assertEqual((await self.get(f'/api/chats/{chat}/turns'))[0]['text'], msg['text'])
-        for changed in (dict(msg,text='Other'), dict(msg,channel='general')):
-            self.assertEqual((await self.post('/api/chats', changed)).status, 409)
-        self.assertEqual((await self.client.get(ORIGIN+f'/api/chats/{chat}/read',headers=self.auth)).status,405)
-        self.assertEqual((await self.client.post(ORIGIN+f'/api/chats/{chat}/read',json={},
-                                                 headers=self.auth|{'Origin':'null'})).status,403)
+        message = {'id':str(uuid4()), 'text':'  Task\n' + '读' * 100}
+        before = await self.threads()
+        await self.start_thread({'id':'Task'}, channel=channel, error='invalid')
+        await self.start_thread(dict(message, text=' '), channel=channel, error='invalid')
+        await self.start_thread(message, channel='missing', error='missing')
+        self.assertEqual(await self.threads(), before)
+        chat = (await self.start_thread(message, channel=channel))['id']
+        self.assertIn({'id':chat,'title':'Task ' + '读' * 75,'channel':channel}, await self.threads())
+        self.assertEqual((await self.history(chat))[0]['text'], message['text'])
+        await self.start_thread(dict(message, text='Other'), channel=channel, error='conflict')
+        await self.start_thread(message, channel='general', error='conflict')
+        # There is no unauthenticated or HTTP read-receipt path to mutate state.
+        await self.request('read_thread', via=self.connect_noise(), chat=chat, error='unauthorized')
+        route = ORIGIN + f'/api/chats/{chat}/read'
+        self.assertEqual((await self.client.get(route)).status, 404)
+        self.assertEqual((await self.client.post(route, json={}, headers={'Origin':'null'})).status, 404)
 
     async def test_final_body_limit_and_redelivery(self):
         await self.adapter.disconnect()
         await self.login()
         rid = str(uuid4())
-        self.assertEqual((await self.post('/api/chats', {'id':rid, 'text':'question'})).status, 202)
+        await self.start_thread({'id':rid, 'text':'question'})
         claim = await self.client.post(ORIGIN+'/adapter/claim', headers=self.bridge, json={})
         self.assertEqual((await claim.json())['id'], rid)
         answer = '🌲' * 65536
@@ -1036,43 +795,52 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             r = await self.client.post(ORIGIN+'/adapter/final', headers=self.bridge, json=data)
             self.assertEqual(r.status, 200)
-        self.assertEqual((await self.get(f'/api/chats/{rid}/turns'))[0]['answer'], answer)
-        self.assertEqual(len(await self.get('/api/notifications')), 1)
+        self.assertEqual((await self.history(rid))[0]['answer'], answer)
+        self.assertEqual(len(await self.pages('inbox')), 1)
         r = await self.client.post(ORIGIN+'/adapter/final', headers=self.bridge, json=dict(data,text=answer+'x'))
         self.assertEqual(r.status, 400)
 
     async def test_independent_device_sessions_restart_expiry_and_revocation(self):
         import hashlib
 
-        first = await (await self.post('/api/login', {'token':self.token, 'name':'Phone'})).json()
-        old = {'Authorization':'Bearer '+first['session']}
-        await self.login()
-        current = await self.get('/api/me')
-        devices = await self.get('/api/sessions')
+        old = self.connect_noise()
+        first = await self.login(via=old, name='Phone')
+        second = await self.login()
+        current = (await self.request('me'))['device']
+        devices = await self.request('devices')
         self.assertEqual(devices['current'], current['id'])
-        self.assertCountEqual(devices['devices'], [first['device'], current])
-        with sqlite3.connect(self.data_dir/'history.sqlite3') as db:
+        self.assertCountEqual(devices['page']['items'], [first['device'], current])
+        expected = hashlib.sha256(b'rothcold-agent/noise/1/device\0' + bytes.fromhex(self.pin)
+                                  + b'native\0' + bytes(first['credential'])).digest()
+        with closing(sqlite3.connect(self.data_dir/'history.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT hash FROM device_sessions WHERE id=?', (first['device']['id'],)).fetchone(),
-                             (hashlib.sha256(first['session'].encode()).digest(),))
+                             (expected,))
+        self.device.close()
+        old.close()
         await self.stop_api()
         self.proc = await self.start_api()
-        self.assertEqual(await self.get('/api/me'), current)
-        self.assertEqual(await (await self.client.get(ORIGIN+'/api/me', headers=old)).json(), first['device'])
-        self.assertEqual((await self.post(f"/api/sessions/{first['device']['id']}/revoke", {})).status, 200)
-        self.assertEqual((await self.client.get(ORIGIN+'/api/me', headers=old)).status, 401)
-        self.assertEqual(await self.get('/api/me'), current)
-        self.assertEqual((await self.post('/api/logout', {})).status, 200)
-        self.assertEqual((await self.client.get(ORIGIN+'/api/me', headers=self.auth)).status, 401)
-        await self.login()
-        with sqlite3.connect(self.data_dir/'history.sqlite3') as db:
-            db.execute('UPDATE device_sessions SET expires_at=1')
-        self.assertEqual((await self.client.get(ORIGIN+'/api/me', headers=self.auth)).status, 401)
+        self.device = self.connect_noise()
+        old = self.connect_noise()
+        self.assertEqual((await self.resume(second))['device'], current)
+        self.assertEqual((await self.resume(first, via=old))['device'], first['device'])
+        self.assertFalse((await self.request('revoke_device', id=first['device']['id']))['current'])
+        await self.request('me', via=old, error='unauthorized')
+        await self.resume(first, via=self.connect_noise(), error='unauthorized')
+        self.assertEqual((await self.request('me'))['device'], current)
+        await self.request('logout')
+        await self.request('me', error='unauthorized')
+        self.device = self.connect_noise()
+        third = await self.login()
+        with closing(sqlite3.connect(self.data_dir/'history.sqlite3')) as db, db:
+            db.execute('UPDATE device_sessions SET expires_at=1 WHERE id=?', [third['device']['id']])
+        await self.request('me', error='unauthorized')
+        await self.resume(third, via=self.connect_noise(), error='unauthorized')
 
     async def test_login_rate_limit(self):
         for _ in range(8):
-            self.assertEqual((await self.post('/api/login',{'token':'wrong'})).status,401)
-        self.assertEqual((await self.post('/api/login',{'token':self.token})).status,429)
-        self.assertEqual((await self.client.get(ORIGIN+'/api/chats',headers=self.bridge_bearer)).status,401)
+            await self.request('login_native', owner_token=secrets.token_urlsafe(32), name='Fixture', error='unauthorized')
+        await self.request('login_native', owner_token=self.token, name='Fixture', error='rate_limited')
+        await self.request('threads', include_archived=False, error='unauthorized')
 
     async def test_cli_history_permissions(self):
         self.assertEqual(self.data_dir.stat().st_mode & 0o777, 0o700)
@@ -1080,14 +848,15 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
 
     async def test_existing_python_workspace(self):
         await self.login()
-        self.assertEqual(await self.get('/api/chats'), [{'id':'old','title':'Old title','channel':'general'}])
-        self.assertEqual(await self.get('/api/notifications'),
+        self.assertEqual(await self.threads(), [{'id':'old','title':'Old title','channel':'general'}])
+        self.assertEqual(await self.pages('inbox'),
                          [{'request':'one','chat':'old','channel':'general','unread':0,
                            'title':'Old title','preview':'旧回复'}])
-        directory = await self.get('/api/directory')
-        self.assertEqual(directory, {'channels':[{'id':'general','name':'General','archived':0}],
-                                     'chats':[{'id':'old','title':'Old title','channel':'general','archived':0}]})
-        rows = await self.get('/api/chats/old/turns')
+        self.assertEqual(await self.pages('categories', include_archived=True),
+                         [{'id':'general','name':'General','archived':False}])
+        self.assertEqual(await self.pages('threads', include_archived=True),
+                         [{'id':'old','title':'Old title','channel':'general','archived':False}])
+        rows = await self.history('old')
         self.assertEqual([(r['id'],r['state'],r['answer']) for r in rows],
                          [('one','answered','旧回复'),('two','unknown',None),('three','queued',None)])
 
@@ -1104,269 +873,73 @@ class GatewayContract(unittest.IsolatedAsyncioTestCase):
         self.adapter.set_message_handler(reply)
         await self.login()
         req = {'id': str(uuid4()), 'text': 'Home thread'}
-        self.assertEqual((await self.post('/api/chats', req)).status, 202)
+        await self.start_thread(req)
         chat = req['id']
-        path = f'/api/chats/{chat}/turns'
         async with asyncio.timeout(5):
-            while (rows := await self.get(path))[0]['state'] != 'answered':
+            while (rows := await self.history(chat))[0]['state'] != 'answered':
                 await asyncio.sleep(.05)
         self.assertEqual(seen, [True])
-        self.assertEqual((await self.post(f'/api/chats/{chat}/read', {})).status, 200)
+        await self.request('read_thread', chat=chat)
         pushed = await self.adapter.send(chat, 'Cron **digest** ready.', metadata={'notify': True})
         self.assertTrue(pushed.success and pushed.message_id and pushed.message_id.startswith('push:'))
         out_of_proc = await entry.standalone_sender_fn(PlatformConfig(enabled=True), chat, 'Cross-platform note')
         self.assertTrue(out_of_proc.get('success'))
         self.assertFalse((await self.adapter.send('missing-chat', 'Oops')).success)
         self.assertIn('error', await entry.standalone_sender_fn(PlatformConfig(enabled=True), 'missing-chat', 'Oops'))
-        rows = await self.get(path)
+        rows = await self.history(chat)
         self.assertEqual(len(rows), 3)
         self.assertEqual([(r['text'], r['state'], r['answer']) for r in rows[1:]], [
             ('', 'answered', 'Cron **digest** ready.'),
             ('', 'answered', 'Cross-platform note'),
         ])
-        inbox = [e for e in await self.get('/api/notifications') if e['chat'] == chat]
+        inbox = [e for e in await self.pages('inbox') if e['chat'] == chat]
         self.assertEqual([e['unread'] for e in inbox], [1, 1, 0])
 
-    async def test_delayed_upstream_401_does_not_clear_a_new_login(self):
-        requested, release = asyncio.Event(), asyncio.Event()
-        old_key, new_key = secrets.token_hex(32), secrets.token_hex(32)
-        logins = iter((old_key, new_key))
-
-        async def upstream(request):
-            if request.path == '/api/status':
-                return web.json_response({'service':'rothcold-agent','apiVersion':1})
-            if request.path == '/api/login':
-                return web.json_response({'session':next(logins), 'device':{'expires_at':int(time.time()) + 60}})
-            if request.headers.get('Authorization') == 'Bearer '+old_key:
-                requested.set()
-                await release.wait()
-                raise web.HTTPUnauthorized()
-            self.assertEqual(request.headers.get('Authorization'), 'Bearer '+new_key)
-            return web.Response(body=b'{"name":"New device"}', content_type='application/json')
-
-        fixture = web.Application()
-        fixture.router.add_route('*', '/{path:.*}', upstream)
-        runner = web.AppRunner(fixture)
-        await runner.setup()
-        self.addAsyncCleanup(runner.cleanup)
-        await web.TCPSite(runner, '127.0.0.1', 8770).start()
-        target = 'http://127.0.0.1:8770'
-        await self.start_web(ROTHCOLD_API_URL=target)
-        async with ClientSession(cookie_jar=CookieJar(unsafe=True)) as browser:
-            select = {'X-Rothcold-Server':target}
-            owner = {'token':self.token}
-            origin = select|{'Origin':WEB}
-            self.assertEqual((await browser.post(WEB+'/api/login', json=owner, headers=origin)).status, 200)
-            old = asyncio.create_task(browser.get(WEB+'/api/me', headers=select))
-            try:
-                await asyncio.wait_for(requested.wait(), 5)
-                self.assertEqual((await browser.post(WEB+'/api/login', json=owner, headers=origin)).status, 200)
-            finally:
-                release.set()
-                response = await asyncio.wait_for(old, 5)
-            self.assertEqual(response.status, 401)
-            self.assertNotIn('Set-Cookie', response.headers)
-            self.assertEqual(await (await browser.get(WEB+'/api/me', headers=select)).json(), {'name':'New device'})
-
-    async def test_standalone_web_default_is_packaged(self):
-        stage = self.data_dir/'web-stage'
-        stage.mkdir()
-        for name in ('server.mjs', 'default-web-config.json'):
-            shutil.copyfile(ROOT/'web'/name, stage/name)
-        shutil.copytree(ROOT/'web/dist', stage/'dist')
-        await self.start_web(stage/'server.mjs')
-        async with self.client.get(WEB+'/connection/config') as response:
-            self.assertEqual(response.status, 200)
-            self.assertEqual(await response.json(), {'defaultApi': ORIGIN})
-
-    async def test_web_connections_and_cookie_boundaries(self):
-        seen = []
-        async def other(request):
-            seen.append((request.path, request.headers.get('Authorization'), request.headers.get('Cookie')))
-            if request.host.endswith(':8771'):
-                raise web.HTTPTemporaryRedirect(location=ORIGIN+'/api/status')
-            if request.host.endswith(':8772'):
-                return web.json_response({'service':'some-other-api','apiVersion':1})
-            if request.path == '/api/status':
-                return web.json_response({'service':'rothcold-agent','apiVersion':1})
-            raise web.HTTPUnauthorized()
-
-        fixture = web.Application()
-        fixture.router.add_route('*', '/{tail:.*}', other)
-        runner = web.AppRunner(fixture)
-        await runner.setup()
-        self.addAsyncCleanup(runner.cleanup)
-        for port in (8770, 8771, 8772):
-            await web.TCPSite(runner, '127.0.0.1', port).start()
-        alt, redirect, wrong = (f'http://127.0.0.1:{port}' for port in (8770, 8771, 8772))
-        config = self.data_dir/'web.json'
-        config.write_text(f'{{"defaultApi":"{alt}","trustedApis":["{ORIGIN}","{alt}","{redirect}","{wrong}"]}}')
-        stop_web = await self.start_web(ROTHCOLD_WEB_CONFIG=str(config))
-        self.assertEqual(await (await self.client.get(WEB+'/connection/config')).json(), {'defaultApi':alt})
-        for route, asset in [('/', 'index.html'), ('/app.js', 'app.js'), ('/app.css', 'app.css')]:
-            response = await self.client.get(WEB+route)
-            self.assertEqual(await response.read(), (ROOT/'web/dist'/asset).read_bytes())
-            self.assertIn("frame-ancestors 'none'", response.headers['Content-Security-Policy'])
-        for variant in ('dark', 'light'):
-            asset = f'brand/icon-{variant}.svg'
-            response = await self.client.get(f'{WEB}/{asset}')
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.content_type, 'image/svg+xml')
-            self.assertEqual(await response.read(), (ROOT/'assets'/asset).read_bytes())
-        await stop_web()
-        stop_web = await self.start_web(ROTHCOLD_WEB_CONFIG=str(config), ROTHCOLD_API_URL=ORIGIN)
-        self.assertEqual(await (await self.client.get(WEB+'/connection/config')).json(), {'defaultApi':ORIGIN})
-        select = {'X-Rothcold-Server':ORIGIN}
-        login_url = WEB+'/api/login'
-        data = {'token':self.token,'name':'Browser fixture'}
-        for chosen, code in [(ORIGIN,200), (alt,200), (redirect,502), (wrong,502),
-                             (ORIGIN+'/',403), (ORIGIN+'@example.invalid',403), ('http://192.0.2.1',403)]:
-            got = await self.client.get(WEB+'/connection/check', headers={'X-Rothcold-Server':chosen})
-            self.assertEqual(got.status, code, chosen)
-            self.assertNotIn('Location', got.headers)
-        for chosen in [redirect, wrong]:
-            response = await self.client.post(login_url, json=data, headers=select|{'Origin':WEB,'X-Rothcold-Server':chosen})
-            self.assertEqual(response.status, 502)
-        for headers in [select, select|{'Origin':ORIGIN}, select|{'Origin':'null'},
-                        select|{'Origin':WEB,'Sec-Fetch-Site':'cross-site'},
-                        select|{'Origin':WEB,'Authorization':'Bearer no'}]:
-            self.assertEqual((await self.client.post(login_url, json=data, headers=headers)).status, 403)
-        self.assertEqual((await self.client.get(WEB, headers={'Host':'localhost:8765'})).status, 403)
-        self.assertEqual((await self.client.options(login_url, headers={'Origin':ORIGIN})).status, 405)
-        response = await self.client.post(login_url, json=data, headers=select|{'Origin':WEB})
-        self.assertEqual(response.status, 200)
-        self.assertEqual(await response.json(), {})
-        wire = response.headers['Set-Cookie']
-        for attr in ('HttpOnly', 'SameSite=Strict', 'Max-Age='):
-            self.assertIn(attr, wire)
-        cookie = wire.split(';', 1)[0]
-        browser = select|{'Cookie':cookie}
-        self.assertEqual((await (await self.client.get(WEB+'/api/me', headers=browser)).json())['name'], data['name'])
-        for path in ('/adapter/claim','/api/../adapter/claim','/api/%2E%2E/adapter/claim','/api/me?secret=x','/api//me'):
-            self.assertEqual((await self.client.get(URL(WEB+path, encoded=True), headers=browser)).status, 404)
-        self.assertEqual((await self.client.get(WEB+'/api/me', headers=browser|{'X-Rothcold-Server':alt})).status, 401)
-        self.assertTrue(seen and all(call == ('/api/status', None, None) for call in seen), seen)
-        await stop_web()
-        await self.stop_api()
-        self.proc = await self.start_api()
-        stop_web = await self.start_web(ROTHCOLD_WEB_CONFIG=str(config), ROTHCOLD_API_URL=ORIGIN)
-        self.assertEqual((await self.client.get(WEB+'/api/me', headers=browser)).status, 200)
-        self.assertEqual((await self.client.post(WEB+'/api/logout', json={}, headers=browser)).status, 403)
-        self.assertEqual((await self.client.get(WEB+'/api/me', headers=browser)).status, 200)
-        logged_out = await self.client.post(WEB+'/api/logout', json={}, headers=browser|{'Origin':WEB})
-        self.assertEqual(logged_out.status, 200)
-        self.assertNotIn('Set-Cookie', logged_out.headers)
-        self.assertEqual((await self.client.get(WEB+'/api/me', headers=browser)).status, 401)
-        await stop_web()
-        # Exercise the web process exactly as a TLS reverse proxy would reach it.
-        https_origin = 'https://workspace.example.test'
-        await self.start_web(ROTHCOLD_WEB_ORIGIN=https_origin)
-        tls_headers = select|{'Host':'workspace.example.test','Origin':https_origin}
-        response = await self.client.post(login_url, json=data, headers=tls_headers)
-        self.assertEqual(response.status, 200)
-        wire = response.headers['Set-Cookie']
-        self.assertTrue(wire.startswith('__Host-'))
-        self.assertIn('; Secure', wire)
-        self.assertEqual((await self.client.post(login_url, json=data, headers=tls_headers|{'Origin':'http://workspace.example.test'})).status, 403)
-
-    @unittest.skipUnless(all(shutil.which(tool) for tool in ('openssl', 'certutil')) and os.environ.get('PLAYWRIGHT_DIR'),
-                         'No local OpenSSL, certutil or Playwright + Chromium')
-    async def test_https_ingress_trusted_browser_and_native_api(self):
-        workspace = 'https://127.0.0.1:8774'
-        native = 'https://127.0.0.1:8775'
-        ca, ca_key = (self.data_dir/name for name in ('ca.pem', 'ca.key'))
-        leaf, leaf_key, csr, extensions = (self.data_dir/name for name in ('leaf.pem', 'leaf.key', 'leaf.csr', 'tls.cnf'))
-        extensions.write_text('basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:127.0.0.1\n'
-                              'extendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid,issuer\n')
-        browser_home = self.data_dir/'browser'
-        nss = browser_home/'.pki/nssdb'
-        nss.mkdir(parents=True)
-        for args in [
-            ('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=Rothcold test CA',
-             '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-keyout', ca_key, '-out', ca),
-            ('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=127.0.0.1',
-             '-keyout', leaf_key, '-out', csr),
-            ('openssl', 'x509', '-req', '-in', csr, '-CA', ca, '-CAkey', ca_key, '-CAcreateserial',
-             '-days', '1', '-extfile', extensions, '-out', leaf),
-            ('certutil', '-N', '-d', 'sql:'+str(nss), '--empty-password'),
-            ('certutil', '-A', '-d', 'sql:'+str(nss), '-n', 'Rothcold test CA', '-t', 'C,,', '-i', ca),
-        ]:
-            result = await asyncio.to_thread(subprocess.run, args, capture_output=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr.decode())
-        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.load_cert_chain(leaf, leaf_key)
-        trust = ssl.create_default_context(cafile=str(ca))
-        await self.start_web(ROTHCOLD_WEB_ORIGIN=workspace)
-        ingress_client = ClientSession(cookie_jar=DummyCookieJar())
-        self.addAsyncCleanup(ingress_client.close)
-
-        async def route(request):
-            if request.host == '127.0.0.1:8774':
-                return await relay(ingress_client, request, WEB, request.host)
-            if request.host == '127.0.0.1:8775' and api_request(request):
-                return await relay(ingress_client, request, ORIGIN, '127.0.0.1:8766')
-            raise web.HTTPNotFound()
-
-        app = web.Application()
-        app.router.add_route('*', '/{path:.*}', route)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        self.addAsyncCleanup(runner.cleanup)
-        for port in (8774, 8775):
-            await web.TCPSite(runner, '127.0.0.1', port, ssl_context=tls).start()
-        async with ClientSession() as device:
-            login = await device.post(native+'/api/login', json={'token':self.token,'name':'TLS native'}, ssl=trust)
-            self.assertEqual(login.status, 200)
-            self.assertNotIn('Set-Cookie', login.headers)
-            auth = {'Authorization':'Bearer '+(await login.json())['session']}
-            self.assertEqual((await device.get(native+'/api/me', headers=auth, ssl=trust)).status, 200)
-            denied = await device.get(native+'/api/me', headers=auth|{'Origin':workspace}, ssl=trust)
-            self.assertEqual(denied.status, 403)
-            self.assertNotIn('Access-Control-Allow-Origin', denied.headers)
-            for ingress in (native, workspace):
-                # Use a valid adapter bearer: the TLS ingress must not route it at all.
-                denied = await device.post(ingress+'/adapter/claim', json={}, headers=self.bridge, ssl=trust)
-                self.assertEqual(denied.status, 404)
-            self.assertEqual((await device.get(native+'/', ssl=trust)).status, 404)
-        browser = await asyncio.create_subprocess_exec(os.environ['NODE'], ROOT/'tests/browser.cjs', '--tls',
-                    env=dict(os.environ, TMPDIR=BROWSER_TMP, HOME=str(browser_home), TLS_WEB_ORIGIN=workspace))
-        try:
-            self.assertEqual(await asyncio.wait_for(browser.wait(), 30), 0)
-        finally:
-            if browser.returncode is None:
-                browser.kill()
-                await browser.wait()
-
     async def test_boundary(self):
-        for path in ('/api/channels', '/api/notifications'):
-            self.assertEqual((await self.client.get(ORIGIN+path)).status,401)
-        self.assertEqual((await self.post('/api/chats/x/read', {})).status,401)
-        url = ORIGIN+'/api/chats'
-        self.assertEqual((await self.client.get(url)).status,401)
-        self.assertEqual((await self.client.post(ORIGIN+'/api/login',json={'token':self.token}, headers={'Origin':ORIGIN})).status,403)
-        self.assertEqual((await self.post('/api/login',{'token':'wrong'})).status,401)
-        await self.login()
-        for headers in ({'Host':'localhost:8766'}, {'Origin':'http://localhost:8766'}, {'Origin':'null'}):
-            self.assertEqual((await self.client.get(url,headers=self.auth|headers)).status,403)
-        self.assertEqual((await self.client.get(url+'?token=x',headers=self.auth)).status,403)
-        self.assertEqual((await self.client.post(url,data='x',headers=self.auth)).status,415)
-        self.assertEqual((await self.post('/api/chats',{'title':'x'*70000})).status,413)
+        wrong_pin = bytes(byte ^ 0xff for byte in bytes.fromhex(self.pin)).hex()
+        unverified = self.connect_noise(pin=wrong_pin)
+        with self.assertRaises(ConnectionError):
+            # Status contains no credential, even if this negative handshake unexpectedly succeeded.
+            await asyncio.to_thread(unverified.exchange, 'status')
+        self.assertEqual((await self.request('status'))['version'], 1)
+        await self.request('categories', include_archived=False, error='unauthorized')
+        await self.request('inbox', error='unauthorized')
+        await self.request('read_thread', chat='x', error='unauthorized')
+        await self.request('slash_catalog', error='unauthorized')
+        await self.request('login_native', owner_token=self.bridge_token, name='Adapter authority', error='unauthorized')
+        session = await self.login()
+        device_header = {'Origin': ORIGIN, 'Authorization': 'Bearer ' + bytes(session['credential']).hex()}
+        self.assertEqual((await self.client.post(ORIGIN+'/adapter/claim', json={}, headers=device_header)).status, 401)
         for route in ('claim', 'connect', 'update', 'push', 'final', 'admission', 'slash-catalog'):
-            self.assertEqual((await self.post('/adapter/'+route, {})).status,401)
-        catalog_path = ORIGIN + '/api/slash-catalog'
+            denied = await self.client.post(ORIGIN+'/adapter/'+route, json={}, headers=self.owner_headers)
+            self.assertEqual(denied.status, 401)
+        for fields in ({'Host':'localhost:8766'}, {'Origin':'http://localhost:8766'}, {'Origin':'null'}):
+            denied = await self.client.post(ORIGIN+'/adapter/claim', json={}, headers=self.bridge|fields)
+            self.assertEqual(denied.status, 403)
+        self.assertEqual((await self.client.post(ORIGIN+'/adapter/claim?token=x', json={}, headers=self.bridge)).status, 403)
+        self.assertEqual((await self.client.post(ORIGIN+'/adapter/claim', data='x', headers=self.bridge)).status, 415)
+        oversized = await self.client.post(ORIGIN+'/adapter/claim', json={'fixture': 'x' * 65536}, headers=self.bridge)
+        self.assertEqual(oversized.status, 413)
         report_path = ORIGIN + '/adapter/slash-catalog'
-        self.assertEqual((await self.client.get(catalog_path, headers=self.bridge_bearer)).status, 401)
         report = {'catalog': {'commands': ['status'], 'skills': ['synthetic-skill']}}
         self.assertEqual((await self.client.post(report_path, headers=self.bridge_bearer, json=report)).status, 403)
         self.assertEqual((await self.client.post(report_path, headers=self.bridge, json=report)).status, 200)
-        catalog = await self.client.get(catalog_path, headers=self.auth)
-        self.assertEqual(await catalog.json(), report)
-        self.assertEqual(catalog.headers['Cache-Control'], 'no-store')
-        r = await self.client.get(ORIGIN)
-        self.assertEqual(r.status, 404)
-        self.assertEqual((await self.client.get(ORIGIN+'/app.js')).status, 404)
-        self.assertEqual((await self.client.get(ORIGIN+'/app.css')).status, 404)
-        self.assertIn("frame-ancestors 'none'",r.headers['Content-Security-Policy'])
-        self.assertNotIn('Access-Control-Allow-Origin',r.headers)
-        self.assertEqual((await self.client.get(url, headers=self.auth|{'Sec-Fetch-Site':'cross-site'})).status,403)
-        self.assertEqual((await self.client.post(ORIGIN+'/adapter/claim', json={}, headers={'Authorization':self.bridge['Authorization']})).status,403)
+        self.assertEqual((await self.request('slash_catalog'))['catalog'], report['catalog'])
+        for path in ('/', '/app.js', '/app.css', '/api/status', '/api/login', '/api/chats', '/api/channels',
+                     '/api/notifications', '/api/slash-catalog', '/api/attachments/x', '/noise'):
+            denied = await self.client.get(ORIGIN+path, headers=self.bridge|{'Sec-Fetch-Site':'cross-site'})
+            self.assertEqual(denied.status, 404, path)
+            self.assertEqual(denied.headers['Cache-Control'], 'no-store')
+            self.assertIn("frame-ancestors 'none'", denied.headers['Content-Security-Policy'])
+            self.assertNotIn('Access-Control-Allow-Origin', denied.headers)
+        denied = await self.client.post(ORIGIN+'/api/login', json={'token':self.token}, headers={'Origin':ORIGIN})
+        self.assertEqual(denied.status, 404)
+        reader, writer = await asyncio.open_connection('127.0.0.1', int(self.native.rsplit(':', 1)[1]))
+        try:
+            writer.write(b'GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            await writer.drain()
+            writer.write_eof()
+            self.assertEqual(await asyncio.wait_for(reader.read(), 5), b'')
+        finally:
+            writer.close()
+            await writer.wait_closed()

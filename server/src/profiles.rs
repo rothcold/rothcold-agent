@@ -130,7 +130,7 @@ fn avatar<'a>(db: &Connection, value: &'a Value, backend_only: bool) -> Result<O
     }
 }
 
-pub fn read(db: &Connection) -> Result<Value> {
+pub fn snapshot(db: &Connection) -> Result<Value> {
     let identity = |role| -> rusqlite::Result<Value> {
         Ok(rows(
             db,
@@ -140,11 +140,20 @@ pub fn read(db: &Connection) -> Result<Value> {
         .pop()
         .unwrap_or_else(|| json!({"name":"","avatar":null})))
     };
-    Ok(
-        json!({"owner":identity("owner")?,"agent":identity("agent")?,"backends":rows(db,
-        "SELECT backend AS id,kind,name,avatar,updated_at FROM backend_profiles ORDER BY backend", [])?}),
-    )
+    Ok(json!({"owner":identity("owner")?,"agent":identity("agent")?}))
 }
+#[cfg(test)]
+fn read(db: &Connection) -> Result<Value> {
+    let mut profile = snapshot(db)?;
+    profile["backends"] = rows(
+        db,
+        "SELECT backend AS id,kind,name,avatar,updated_at FROM backend_profiles ORDER BY backend",
+        [],
+    )?
+    .into();
+    Ok(profile)
+}
+
 fn edit(db: &mut Connection, input: &Value) -> Result<Value> {
     let tx = db.transaction()?;
     for role in ["owner", "agent"] {
@@ -161,7 +170,7 @@ fn edit(db: &mut Connection, input: &Value) -> Result<Value> {
             tx.execute("INSERT INTO identities(role,avatar) VALUES(?,?) ON CONFLICT(role) DO UPDATE SET avatar=excluded.avatar", params![role, avatar(&tx, value, false)?])?;
         }
     }
-    let profile = read(&tx)?;
+    let profile = snapshot(&tx)?;
     tx.commit()?;
     Ok(profile)
 }
@@ -212,23 +221,20 @@ fn sync_profile(
             .ok_or(NO_PROFILE)?,
     };
     apply(&tx, &name, avatar.as_deref(), true)?;
-    let mut profile = read(&tx)?;
+    let mut profile = self::snapshot(&tx)?;
     profile["sync"] = json!({"backend":backend,"refresh":refresh,"name":!name.is_empty(),"avatar":avatar.is_some()});
     tx.commit()?;
     Ok(profile)
 }
 
-pub async fn get(State(app): State<App>) -> Result<Json<Value>> {
-    Ok(Json(read(&lock(&app.db))?))
-}
-pub async fn update(State(app): State<App>, Extension(data): Input) -> Result<Json<Value>> {
+pub fn update_profile(app: &App, data: &Value) -> Result<Value> {
     // Serialize manual writes and the revision check at sync apply time.
     let mut polls = lock(&app.profiles);
-    let profile = edit(&mut lock(&app.db), &data)?;
+    let profile = edit(&mut lock(&app.db), data)?;
     if data["agent"].get("name").is_some() || data["agent"].get("avatar").is_some() {
         polls.agent_edit_revision += 1;
     }
-    Ok(Json(profile))
+    Ok(profile)
 }
 pub async fn report(State(app): State<App>, Extension(data): Input) -> Result<Json<Value>> {
     let backend = backend_id(data["backend"].as_str().ok_or(BAD)?)?;
@@ -258,11 +264,15 @@ pub async fn report(State(app): State<App>, Extension(data): Input) -> Result<Js
     }
     Ok(Json(json!({})))
 }
-pub async fn sync(State(app): State<App>, Extension(data): Input) -> Result<Json<Value>> {
+pub async fn sync_selected(
+    app: &App,
+    requested: Option<&str>,
+    authorize: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<Value> {
     let (backend, request, revision) = {
         let mut mailbox = lock(&app.profiles);
-        let backend = if let Some(id) = data.get("backend") {
-            backend_id(id.as_str().ok_or(BAD)?)?.into()
+        let backend = if let Some(id) = requested {
+            backend_id(id)?.into()
         } else if let Some(id) = mailbox.active() {
             id
         } else {
@@ -294,12 +304,9 @@ pub async fn sync(State(app): State<App>, Extension(data): Input) -> Result<Json
             "Agent profile was edited during sync. The manual edit was kept.",
         ));
     }
-    Ok(Json(sync_profile(
-        &mut lock(&app.db),
-        &backend,
-        refresh,
-        snapshot,
-    )?))
+    let mut db = lock(&app.db);
+    authorize(&db)?;
+    sync_profile(&mut db, &backend, refresh, snapshot)
 }
 
 #[cfg(test)]

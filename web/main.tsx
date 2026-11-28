@@ -1,3 +1,13 @@
+import {
+	configuredBackends,
+	isApprovalDraft,
+	message,
+	selectionKey,
+	WorkspaceClient,
+	type Backend,
+	type Choice,
+	type Selection,
+} from "./noise-workspace.ts";
 import type { JSONContent } from "@tiptap/core";
 import {
 	useCallback,
@@ -34,9 +44,6 @@ import {
 } from "./turn-media.tsx";
 import { createRoot } from "react-dom/client";
 import {
-	api,
-	connection,
-	SessionExpired,
 	pending,
 	replyDraft,
 	requestFor,
@@ -88,10 +95,11 @@ function useSubmit(report: Report) {
 			submitting.current = true;
 			setBusy(true);
 			report("");
+			const form = e.currentTarget;
 			try {
-				await action(e.currentTarget);
+				await action(form);
 			} catch (e) {
-				report(failure(e));
+				if (form.isConnected) report(failure(e));
 			} finally {
 				submitting.current = false;
 				setBusy(false);
@@ -166,19 +174,19 @@ function ActivityList({
 	updates,
 	agentName,
 	agentAvatar,
-	mediaBase,
+	mediaClient,
 	decide,
 }: {
 	updates: TurnUpdate[];
 	agentName: string;
 	agentAvatar?: string | null;
-	mediaBase: string;
-	decide?: (id: string, text: string) => void;
+	mediaClient: WorkspaceClient;
+	decide?: (id: string, choice: Choice) => void;
 }) {
 	return (
 		<div className="activity-list">
 			{updates.map((u) => {
-				if (u.kind === "progress")
+				if (u.kind === "progress" || u.choices?.length)
 					return (
 						<div key={u.id}>
 							<pre
@@ -197,9 +205,7 @@ function ActivityList({
 											type="button"
 											key={c}
 											className={c === "deny" ? "danger-action" : undefined}
-											onClick={() =>
-												decide(u.id, c === "deny" ? "/deny" : `/approve ${c}`)
-											}
+											onClick={() => decide(u.id, c)}
 										>
 											{
 												{
@@ -220,7 +226,7 @@ function ActivityList({
 							<IdentityAvatar
 								identity="agent"
 								id={agentAvatar}
-								base={mediaBase}
+								base={mediaClient}
 							/>
 							{agentName} · update
 						</p>
@@ -488,7 +494,7 @@ type ConversationProps = {
 	channel: Channel;
 	channels: Channel[];
 	profile: Profile | undefined;
-	mediaBase: string;
+	mediaClient: WorkspaceClient;
 	attachmentDrafts: AttachmentDrafts;
 	setAttachmentDrafts: SetAttachmentDrafts;
 	move: (channel: string) => Promise<void>;
@@ -498,7 +504,7 @@ type ConversationProps = {
 	alerts: ReturnType<typeof useBrowserAlerts>;
 	onRead: (id: string, chat: string) => Promise<boolean>;
 	drawerOpen: boolean;
-	server: string;
+	server: WorkspaceClient;
 	report: Report;
 	drafts: Map<string, Draft>;
 	rename: (title: string) => Promise<void>;
@@ -506,8 +512,8 @@ type ConversationProps = {
 type ThreadAlerts = ReturnType<typeof useBrowserAlerts>;
 
 function useConversationHistory(
-	path: string,
-	server: string,
+	chat: string,
+	server: WorkspaceClient,
 	report: Report,
 	newest?: string,
 ) {
@@ -515,24 +521,43 @@ function useConversationHistory(
 	const [revision, reload] = useState(0);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: each successful POST invalidates the current history revision
 	useEffect(() => {
-		let active = true;
-		let timer: number;
+		const controller = new AbortController();
+		let timer: number | undefined;
+		let reading = false;
+		let unsettled = true;
+		const active = () => !controller.signal.aborted && !server.signal.aborted;
 		async function read() {
+			if (reading || !active()) return;
+			reading = true;
 			try {
-				const rows = await api<Turn[]>(path, server);
-				if (!active) return;
+				const rows = await server.history(chat, controller.signal);
+				if (!active()) return;
+				unsettled = pending(rows);
 				setTurns(rows);
-				if (pending(rows)) timer = window.setTimeout(read, 1500);
 			} catch (e) {
-				if (active) report(failure(e));
+				if (active()) report(failure(e));
+			} finally {
+				reading = false;
+				// A Native enqueue or another browser's turn can change an otherwise settled
+				// thread without producing an Inbox event. Only poll settled foreground detail.
+				if (active() && (unsettled || document.visibilityState === "visible"))
+					timer = window.setTimeout(read, unsettled ? 1500 : 4500);
 			}
 		}
+		function onVisibility() {
+			if (document.visibilityState === "visible") {
+				clearTimeout(timer);
+				void read();
+			} else if (!unsettled) clearTimeout(timer);
+		}
+		document.addEventListener("visibilitychange", onVisibility);
 		void read();
 		return () => {
-			active = false;
+			controller.abort();
 			clearTimeout(timer);
+			document.removeEventListener("visibilitychange", onVisibility);
 		};
-	}, [path, server, report, revision, newest]);
+	}, [chat, server, report, revision, newest]);
 	return { turns, invalidate: () => reload((n) => n + 1) };
 }
 
@@ -594,7 +619,6 @@ function ReplyComposer({
 	attachmentDrafts,
 	setAttachmentDrafts,
 	report,
-	path,
 	sent,
 }: Pick<
 	ConversationProps,
@@ -606,7 +630,6 @@ function ReplyComposer({
 	| "report"
 > & {
 	turns: Turn[] | null;
-	path: string;
 	sent: () => void;
 }) {
 	const editor = useRef<ComposerEditorHandle>(null);
@@ -633,7 +656,7 @@ function ReplyComposer({
 					draft,
 					literalDraft(drafts.get(chat.id)),
 				);
-				await api(path, server, draft);
+				await server.send(chat.id, draft);
 				// A reopened composer may still hold this draft. Leave the entire request
 				// intact so its explicit retry keeps the same ID and attachments.
 				if (!form.isConnected || drafts.get(chat.id) !== draft) return;
@@ -691,7 +714,7 @@ function ReplyComposer({
 }
 
 type TurnActions = {
-	decide: (id: string, choice: string) => Promise<void>;
+	decide: (id: string, choice: Choice) => Promise<void>;
 	stopWaiting: (id: string) => Promise<void>;
 };
 
@@ -727,12 +750,12 @@ function PendingTurn({
 function TurnActivity({
 	turn,
 	profile,
-	mediaBase,
+	mediaClient,
 	decide,
 }: {
 	turn: Turn;
 	profile: Profile | undefined;
-	mediaBase: string;
+	mediaClient: WorkspaceClient;
 	decide: TurnActions["decide"];
 }) {
 	if (!turn.updates.length) return null;
@@ -742,7 +765,7 @@ function TurnActivity({
 			updates={turn.updates}
 			agentName={agentName}
 			agentAvatar={profile?.agent.avatar}
-			mediaBase={mediaBase}
+			mediaClient={mediaClient}
 			decide={turn.answer === null ? decide : undefined}
 		/>
 	);
@@ -761,11 +784,13 @@ function TurnActivity({
 function OwnerTurn({
 	turn,
 	profile,
-	mediaBase,
+	mediaClient,
+	report,
 }: {
 	turn: Turn;
 	profile?: Profile;
-	mediaBase: string;
+	mediaClient: WorkspaceClient;
+	report: Report;
 }) {
 	if (!turn.text && !turn.attachments?.length) return null;
 	return (
@@ -773,12 +798,16 @@ function OwnerTurn({
 			<IdentityAvatar
 				identity="owner"
 				id={profile?.owner.avatar}
-				base={mediaBase}
+				base={mediaClient}
 			/>
 			<p className="speaker">{profile?.owner.name || fallbackName.owner}</p>
 			{turn.text && <p className="message">{turn.text}</p>}
 			{turn.attachments && (
-				<SentAttachments items={turn.attachments} base={mediaBase} />
+				<SentAttachments
+					items={turn.attachments}
+					base={mediaClient}
+					report={report}
+				/>
 			)}
 		</div>
 	);
@@ -788,7 +817,7 @@ type TurnTimelineProps = Pick<
 	ConversationProps,
 	| "chat"
 	| "profile"
-	| "mediaBase"
+	| "mediaClient"
 	| "events"
 	| "alerts"
 	| "drawerOpen"
@@ -810,7 +839,7 @@ function TurnArticle({
 	const {
 		chat,
 		profile,
-		mediaBase,
+		mediaClient,
 		events,
 		alerts,
 		drawerOpen,
@@ -821,12 +850,17 @@ function TurnArticle({
 	const delivered = answered && !turn.text && !turn.attachments?.length;
 	return (
 		<article className="turn">
-			<OwnerTurn turn={turn} profile={profile} mediaBase={mediaBase} />
+			<OwnerTurn
+				turn={turn}
+				profile={profile}
+				mediaClient={mediaClient}
+				report={report}
+			/>
 			<div className="assistant-turn">
 				<IdentityAvatar
 					identity="agent"
 					id={profile?.agent.avatar}
-					base={mediaBase}
+					base={mediaClient}
 				/>
 				<p className="speaker">
 					{profile?.agent.name || fallbackName.agent}
@@ -840,7 +874,7 @@ function TurnArticle({
 				<TurnActivity
 					turn={turn}
 					profile={profile}
-					mediaBase={mediaBase}
+					mediaClient={mediaClient}
 					decide={actions.decide}
 				/>
 				{turn.answer === null ? (
@@ -914,15 +948,15 @@ function TurnTimeline({
 }
 
 function threadActions(
-	path: string,
-	server: string,
+	chat: string,
+	server: WorkspaceClient,
 	report: Report,
 	invalidate: () => void,
 ): TurnActions {
 	return {
-		async decide(approval, text) {
+		async decide(approval, choice) {
 			try {
-				await api(path, server, { id: crypto.randomUUID(), text, approval });
+				await server.call("decide_approval", { chat, id: approval, choice });
 				invalidate();
 			} catch (error) {
 				report(failure(error));
@@ -930,7 +964,7 @@ function threadActions(
 		},
 		async stopWaiting(id) {
 			try {
-				await api(`${path}/${encodeURIComponent(id)}/stop-waiting`, server, {});
+				await server.call("release_turn", { chat, id });
 			} finally {
 				invalidate();
 			}
@@ -952,9 +986,8 @@ function Conversation(props: ConversationProps) {
 		events,
 	} = props;
 	const archiveReason = archivedThreadReason(chat, channel);
-	const path = `chats/${chat.id}/turns`;
 	const { turns, invalidate } = useConversationHistory(
-		path,
+		chat.id,
 		server,
 		report,
 		events[0]?.request,
@@ -980,7 +1013,7 @@ function Conversation(props: ConversationProps) {
 				turns={turns}
 				follow={follow}
 				workspace={props}
-				actions={threadActions(path, server, report, invalidate)}
+				actions={threadActions(chat.id, server, report, invalidate)}
 			/>
 			{archiveReason ? (
 				<p className="archive-notice" role="status">
@@ -989,7 +1022,6 @@ function Conversation(props: ConversationProps) {
 			) : (
 				<ReplyComposer
 					{...props}
-					path={path}
 					turns={turns}
 					sent={() => {
 						follow.current = true;
@@ -1003,8 +1035,8 @@ function Conversation(props: ConversationProps) {
 type ThreadOpener = { id: string; trigger?: HTMLElement };
 type WorkspaceRoot = RefObject<HTMLDivElement | null>;
 type WorkspaceProps = {
-	server: string;
-	mediaBase: string;
+	server: WorkspaceClient;
+	mediaClient: WorkspaceClient;
 	attachmentDrafts: AttachmentDrafts;
 	setAttachmentDrafts: SetAttachmentDrafts;
 	report: Report;
@@ -1013,7 +1045,7 @@ type WorkspaceProps = {
 	drafts: Map<string, Draft>;
 };
 
-function useWorkspaceDirectory(server: string, report: Report) {
+function useWorkspaceDirectory(server: WorkspaceClient, report: Report) {
 	const [directory, setDirectory] = useState<WorkspaceDirectory>({
 		channels: [],
 		chats: [],
@@ -1025,7 +1057,7 @@ function useWorkspaceDirectory(server: string, report: Report) {
 		async function refresh() {
 			const started = revision.current;
 			try {
-				const value = await api<WorkspaceDirectory>("directory", server);
+				const value = await server.directory();
 				if (active && revision.current === started) setDirectory(value);
 			} catch (e) {
 				if (active) report(failure(e));
@@ -1088,7 +1120,7 @@ function useWorkspaceDirectory(server: string, report: Report) {
 type Directory = ReturnType<typeof useWorkspaceDirectory>;
 
 function useWorkspaceProfile(
-	server: string,
+	server: WorkspaceClient,
 	report: Report,
 	settings: boolean,
 ) {
@@ -1096,7 +1128,7 @@ function useWorkspaceProfile(
 	// biome-ignore lint/correctness/useExhaustiveDependencies: opening Settings also refreshes discoverable backends
 	useEffect(() => {
 		let active = true;
-		void api<Profile>("profile", server).then(
+		void server.profile().then(
 			(value) => {
 				if (active) setProfile(value);
 			},
@@ -1112,9 +1144,8 @@ function useWorkspaceProfile(
 }
 
 function useWorkspaceInbox(
-	server: string,
+	server: WorkspaceClient,
 	report: Report,
-	expireWorkspace: Report,
 	alerts: ThreadAlerts,
 ) {
 	const [events, setEvents] = useState<InboxEvent[] | null>(null);
@@ -1126,15 +1157,14 @@ function useWorkspaceInbox(
 		let timer: number;
 		async function poll() {
 			try {
-				const rows = await api<InboxEvent[]>("notifications", server);
+				const rows = await server.inbox();
 				if (active) {
 					capture(rows);
 					setEvents(rows);
 				}
 			} catch (e) {
 				if (active) {
-					if (e instanceof SessionExpired) expireWorkspace(e.message);
-					else report(failure(e));
+					report(failure(e));
 				}
 			} finally {
 				if (active) timer = window.setTimeout(poll, 4000);
@@ -1145,11 +1175,11 @@ function useWorkspaceInbox(
 			active = false;
 			clearTimeout(timer);
 		};
-	}, [server, report, revision, capture, expireWorkspace]);
+	}, [server, report, revision, capture]);
 	const onRead = useCallback(
 		async (id: string, chat: string) => {
 			try {
-				await api(`chats/${chat}/read/${encodeURIComponent(id)}`, server, {});
+				await server.call("read_reply", { chat, id });
 				fresh.current.delete(id);
 				setEvents(
 					(rows) =>
@@ -1168,7 +1198,7 @@ function useWorkspaceInbox(
 	);
 	async function markRead(id: string) {
 		try {
-			await api(`chats/${id}/read`, server, {});
+			await server.call("read_thread", { chat: id });
 			refresh((n) => n + 1);
 		} catch (e) {
 			report(failure(e));
@@ -1466,7 +1496,7 @@ function CreateCategoryForm({
 	recordCategory,
 	submission,
 }: {
-	server: string;
+	server: WorkspaceClient;
 	recordCategory: Directory["recordCategory"];
 	submission: WorkspaceSubmit;
 }) {
@@ -1478,7 +1508,7 @@ function CreateCategoryForm({
 				method="post"
 				onSubmit={submit(async (form) => {
 					const name = String(new FormData(form).get("name") ?? "").trim();
-					const { id } = await api<{ id: string }>("channels", server, {
+					const { id } = await server.call("create_category", {
 						name,
 					});
 					if (!form.isConnected) return;
@@ -1601,8 +1631,8 @@ function NewThreadComposer({
 				const submittedAt = navigationRevision.current;
 				const draft = requestFor(text, drafts.get(key) ?? null, firstFiles.ids);
 				saveComposerDraft(drafts, key, draft, literalDraft(drafts.get(key)));
-				const thread = await api<Omit<Chat, "archived">>("chats", server, {
-					...draft,
+				const thread = await server.call("start_thread", {
+					message: message(draft),
 					channel: channel.id,
 				});
 				if (!workspace.current?.isConnected) return;
@@ -1666,7 +1696,7 @@ function CategoryMenu({
 }: {
 	channel: Channel;
 	directory: Directory;
-	server: string;
+	server: WorkspaceClient;
 	report: Report;
 }) {
 	const { busy, submit } = useSubmit(report);
@@ -1677,11 +1707,10 @@ function CategoryMenu({
 				method="post"
 				onSubmit={submit(async (form) => {
 					const name = String(new FormData(form).get("name") ?? "").trim();
-					const saved = await api<Pick<Channel, "name">>(
-						`channels/${channel.id}/rename`,
-						server,
-						{ name },
-					);
+					const saved = await server.call("rename_category", {
+						id: channel.id,
+						name,
+					});
 					directory.updateCategory(channel.id, saved);
 					form.closest("details")?.removeAttribute("open");
 				})}
@@ -1703,12 +1732,13 @@ function CategoryMenu({
 				<form
 					method="post"
 					onSubmit={submit(async (form) => {
-						const saved = await api<Pick<Channel, "archived">>(
-							`channels/${channel.id}/archive`,
-							server,
-							{ archived: !channel.archived },
-						);
-						directory.updateCategory(channel.id, saved);
+						const saved = await server.call("archive_category", {
+							id: channel.id,
+							archived: !channel.archived,
+						});
+						directory.updateCategory(channel.id, {
+							archived: saved.archived ? 1 : 0,
+						});
 						const menu = form.closest("details");
 						menu?.removeAttribute("open");
 						menu?.querySelector("summary")?.focus();
@@ -1845,34 +1875,28 @@ function ThreadPane({
 		server,
 		drafts,
 		report,
-		mediaBase,
+		mediaClient,
 		attachmentDrafts,
 		setAttachmentDrafts,
 	} = config;
 	const events = inbox.events?.filter((event) => event.chat === chat.id) ?? [];
 	async function move(destination: string) {
-		const moved = await api<Pick<Chat, "id" | "channel">>(
-			`chats/${chat.id}/move`,
-			server,
-			{ channel: destination },
-		);
+		const moved = await server.call("move_thread", {
+			id: chat.id,
+			channel: destination,
+		});
 		directory.updateThread(moved.id, { channel: moved.channel });
 		inbox.moveEvents(moved.id, moved.channel);
 	}
 	async function archive(archived: boolean) {
-		const saved = await api<Pick<Chat, "archived">>(
-			`chats/${chat.id}/archive`,
-			server,
-			{ archived },
-		);
-		directory.updateThread(chat.id, saved);
+		const saved = await server.call("archive_thread", {
+			id: chat.id,
+			archived,
+		});
+		directory.updateThread(chat.id, { archived: saved.archived ? 1 : 0 });
 	}
 	async function rename(title: string) {
-		const saved = await api<{ title: string }>(
-			`chats/${chat.id}/rename`,
-			server,
-			{ title },
-		);
+		const saved = await server.call("rename_thread", { id: chat.id, title });
 		directory.updateThread(chat.id, { title: saved.title });
 	}
 	return (
@@ -1885,7 +1909,7 @@ function ThreadPane({
 			channel={channel}
 			channels={directory.channels.filter((item) => !item.archived)}
 			profile={profile}
-			mediaBase={mediaBase}
+			mediaClient={mediaClient}
 			attachmentDrafts={attachmentDrafts}
 			setAttachmentDrafts={setAttachmentDrafts}
 			move={move}
@@ -1924,7 +1948,7 @@ function WorkspacePane({
 	expireWorkspace: Report;
 	category: ReactNode;
 }) {
-	const { server, report, mediaBase, changeServer } = config;
+	const { server, report, mediaClient, changeServer } = config;
 	if (route.settings)
 		return (
 			<DeviceSettings
@@ -1936,7 +1960,7 @@ function WorkspacePane({
 				<ProfileSettings
 					profile={profile.profile}
 					server={server}
-					base={mediaBase}
+					base={mediaClient}
 					onProfile={profile.setProfile}
 					report={report}
 				/>
@@ -1998,7 +2022,7 @@ function Workspace(config: WorkspaceProps) {
 		route.channel?.id,
 	);
 	useFirstMessageFocus(workspace, history);
-	const inbox = useWorkspaceInbox(server, report, expireWorkspace, alerts);
+	const inbox = useWorkspaceInbox(server, report, alerts);
 	const profile = useWorkspaceProfile(server, report, route.settings);
 	useBackgroundAlerts(inbox.events, history.selected, obscured, alerts.notify);
 	const { unread, total } = unreadCounts(inbox.events);
@@ -2130,7 +2154,7 @@ function DeviceSettings({
 	changeServer,
 	children,
 }: {
-	server: string;
+	server: WorkspaceClient;
 	report: Report;
 	logout: () => void;
 	changeServer: () => void;
@@ -2140,7 +2164,7 @@ function DeviceSettings({
 	const { busy, submit } = useSubmit(report);
 	useEffect(() => {
 		let active = true;
-		void api<Devices>("sessions", server).then(
+		void server.devices().then(
 			(list) => {
 				if (active) setDevices(list);
 			},
@@ -2160,7 +2184,7 @@ function DeviceSettings({
 			<div className="pane-scroll">
 				<div className="settings-connection">
 					<p>
-						Connected to <code>{server}</code>
+						Connected to <strong>{server.selection.backend.label}</strong>
 					</p>
 					<div className="settings-actions">
 						<button
@@ -2174,7 +2198,8 @@ function DeviceSettings({
 						<form
 							method="post"
 							onSubmit={submit(async () => {
-								await api("logout", server, {});
+								await server.call("logout", {});
+								await server.forget().catch(() => {});
 								logout();
 							})}
 						>
@@ -2205,7 +2230,7 @@ function DeviceSettings({
 									<form
 										method="post"
 										onSubmit={submit(async () => {
-											await api(`sessions/${id}/revoke`, server, {});
+											await server.call("revoke_device", { id });
 											setDevices(
 												(list) =>
 													list && {
@@ -2236,84 +2261,54 @@ function DeviceSettings({
 	);
 }
 
-const preference = "rothcold.api-server";
-function rememberedServer() {
+const connectionPreference = "rothcold.noise-selection";
+function rememberedSelection():
+	| { id: string; scope: string; pin: string }
+	| undefined {
 	try {
-		return localStorage.getItem(preference);
+		const data = JSON.parse(
+			localStorage.getItem(connectionPreference) ?? "null",
+		);
+		if (
+			data &&
+			typeof data.id === "string" &&
+			/^[0-9a-f]{64}$/.test(data.scope) &&
+			/^[0-9a-f]{64}$/.test(data.pin)
+		)
+			return data;
 	} catch {
-		return null;
+		/* Public preferences may be unavailable. */
 	}
 }
-function rememberServer(server: string) {
+function rememberSelection({ backend, pin }: Selection) {
 	try {
-		localStorage.setItem(preference, server);
+		localStorage.setItem(
+			connectionPreference,
+			JSON.stringify({ id: backend.id, scope: backend.scope, pin }),
+		);
 	} catch {
-		/* storage can be unavailable */
+		/* The current connection still works. */
 	}
 }
 
-type Gate = {
-	page: "loading" | "connect" | "login" | "workspace";
-	server: string;
-	mediaBase: string;
-};
-async function verifyServer(server: string) {
-	const { mediaBase } = await connection<{ mediaBase: string }>(
-		"check",
-		server,
-	);
-	let page: Gate["page"] = "workspace";
-	try {
-		await api("me", server);
-	} catch (e) {
-		if (!(e instanceof SessionExpired)) throw e;
-		page = "login";
-	}
-	return { page, server, mediaBase };
-}
-function useRestoreConnection(
-	setAddress: (address: string) => void,
-	setGate: (next: Gate) => void,
-	report: Report,
-) {
-	useEffect(() => {
-		let active = true;
-		async function restore() {
-			const saved = rememberedServer();
-			try {
-				const { defaultApi } = await connection<{ defaultApi: string }>(
-					"config",
-				);
-				if (!active) return;
-				setAddress(saved ?? defaultApi);
-				if (saved) {
-					const next = await verifyServer(saved);
-					if (active) setGate(next);
-				} else setGate({ page: "connect", server: "", mediaBase: "" });
-			} catch (e) {
-				if (active) {
-					if (saved) setAddress(saved);
-					report(failure(e));
-					setGate({ page: "connect", server: "", mediaBase: "" });
-				}
-			}
-		}
-		void restore();
-		return () => {
-			active = false;
-		};
-	}, [setAddress, setGate, report]);
-}
-
+type Gate =
+	| { page: "loading" | "connect" }
+	| { page: "login" | "workspace" | "reconnect"; client: WorkspaceClient };
 function ConnectScreen({
-	address,
-	changeAddress,
+	backends,
+	selected,
+	pin,
+	choose,
+	updatePin,
 	busy,
 	submit,
 	cancel,
 }: {
-	address: string;
-	changeAddress: (address: string) => void;
+	backends: Backend[];
+	selected: string;
+	pin: string;
+	choose: (id: string) => void;
+	updatePin: (pin: string) => void;
 	busy: boolean;
 	submit: FormEventHandler<HTMLFormElement>;
 	cancel?: () => void;
@@ -2322,21 +2317,42 @@ function ConnectScreen({
 		<section id="gate">
 			<p className="eyebrow">Private workspace</p>
 			<h1>Connect to a server</h1>
-			<p>Use an API address configured by your web host administrator.</p>
+			<p>
+				Choose a trusted backend and enter the Noise pin verified independently
+				with its operator.
+			</p>
 			<form method="post" onSubmit={submit}>
-				<label htmlFor="server-address">Server address</label>
-				<input
+				<label htmlFor="server-address">Trusted backend</label>
+				<select
 					id="server-address"
-					type="url"
-					value={address}
+					value={selected}
 					required
-					maxLength={512}
+					disabled={busy || !backends.length}
+					onChange={(event) => choose(event.target.value)}
+				>
+					{backends.map(({ id, label }) => (
+						<option key={id} value={id}>
+							{label}
+						</option>
+					))}
+				</select>
+				<label htmlFor="responder-pin">Trusted Noise pin</label>
+				<input
+					id="responder-pin"
+					value={pin}
+					required
+					maxLength={64}
 					disabled={busy}
 					autoComplete="off"
-					onChange={(event) => changeAddress(event.target.value)}
+					spellCheck={false}
+					onChange={(event) => updatePin(event.target.value)}
 				/>
 				<div className="rename-actions">
-					<button className="primary-action" type="submit" disabled={busy}>
+					<button
+						className="primary-action"
+						type="submit"
+						disabled={busy || !backends.length}
+					>
 						Connect
 					</button>
 					{cancel && (
@@ -2356,12 +2372,12 @@ function ConnectScreen({
 }
 
 function LoginScreen({
-	server,
+	backend,
 	busy,
 	submit,
 	changeServer,
 }: {
-	server: string;
+	backend: Backend;
 	busy: boolean;
 	submit: FormEventHandler<HTMLFormElement>;
 	changeServer: () => void;
@@ -2371,7 +2387,7 @@ function LoginScreen({
 			<p className="eyebrow">Private workspace</p>
 			<h1>Sign in</h1>
 			<p>
-				Connected to <code>{server}</code>
+				Connected to <strong>{backend.label}</strong> with a verified Noise pin.
 			</p>
 			<form method="post" onSubmit={submit}>
 				<label htmlFor="token">Owner token</label>
@@ -2408,59 +2424,233 @@ function LoginScreen({
 	);
 }
 
+function ReconnectScreen({
+	backend,
+	busy,
+	submit,
+	changeServer,
+}: {
+	backend: Backend;
+	busy: boolean;
+	submit: FormEventHandler<HTMLFormElement>;
+	changeServer: () => void;
+}) {
+	return (
+		<section id="gate">
+			<p className="eyebrow">Private workspace</p>
+			<h1>Connection lost</h1>
+			<p>
+				Reconnect to {backend.label} to refresh the workspace. Drafts are not
+				sent again automatically.
+			</p>
+			<form method="post" onSubmit={submit}>
+				<div className="rename-actions">
+					<button type="submit" className="primary-action" disabled={busy}>
+						Reconnect
+					</button>
+					<button
+						type="button"
+						className="quiet"
+						disabled={busy}
+						onClick={changeServer}
+					>
+						Change server
+					</button>
+				</div>
+			</form>
+		</section>
+	);
+}
+
 function App() {
-	const [gate, setGate] = useState<Gate>({
-		page: "loading",
-		server: "",
-		mediaBase: "",
-	});
-	const [address, setAddress] = useState("");
-	const [previous, setPrevious] = useState<Gate>();
+	const [gate, setGate] = useState<Gate>({ page: "loading" });
+	const [backends, setBackends] = useState<Backend[]>([]);
+	const [serverId, setServerId] = useState("");
+	const [pin, setPin] = useState("");
+	const [previous, setPrevious] = useState<{
+		selection: Selection;
+		wasDisconnected: boolean;
+	}>();
+	const [restoringPrevious, setRestoringPrevious] = useState(false);
+	const clientRef = useRef<WorkspaceClient>(undefined);
 	const drafts = useRef(new Map<string, Draft>());
 	const [attachmentDrafts, setAttachmentDrafts] = useState<AttachmentDrafts>(
 		{},
 	);
 	const [notice, report] = useState("");
 	const { busy, submit } = useSubmit(report);
-	const expire = useCallback((message: string) => {
+	const clearDrafts = useCallback(() => {
 		drafts.current = new Map();
 		setAttachmentDrafts({});
-		report(message);
-		setGate((gate) => ({ ...gate, page: "login" }));
 	}, []);
-	useRestoreConnection(setAddress, setGate, report);
+	const expire = useCallback(
+		(detail: string) => {
+			const client = clientRef.current;
+			if (!client) return;
+			client.close();
+			clearDrafts();
+			report(detail);
+			const next = new WorkspaceClient(client.selection);
+			clientRef.current = next;
+			setGate({ page: "login", client: next });
+		},
+		[clearDrafts],
+	);
+	const clearIncompleteUploads = useCallback(() => {
+		setAttachmentDrafts((all) =>
+			Object.fromEntries(
+				Object.entries(all).map(([key, entries]) => [
+					key,
+					entries.filter((entry) => entry.item),
+				]),
+			),
+		);
+	}, []);
+	const watchConnection = useCallback(
+		(client: WorkspaceClient) => {
+			client.onExpired((error) => {
+				if (clientRef.current === client) expire(error.message);
+			});
+			client.onLost(({ uncertain }) => {
+				if (clientRef.current !== client) return;
+				for (const [key, draft] of drafts.current) {
+					if (isApprovalDraft(draft.text)) drafts.current.delete(key);
+					else if (draft.approval)
+						drafts.current.set(key, { ...draft, approval: undefined });
+				}
+				clearIncompleteUploads();
+				report(
+					uncertain
+						? "A submitted change may have committed without a receipt. Check the workspace after reconnecting; nothing was retried."
+						: "",
+				);
+				setGate({ page: "reconnect", client });
+			});
+		},
+		[clearIncompleteUploads, expire],
+	);
+	const openSelection = useCallback(
+		async (selection: Selection, beforeDisplay?: () => void) => {
+			clientRef.current?.close();
+			const client = new WorkspaceClient(selection);
+			clientRef.current = client;
+			watchConnection(client);
+			const warning = await client.check();
+			if (clientRef.current !== client || client.signal.aborted) return;
+			if (warning) report(warning.message);
+			beforeDisplay?.();
+			setGate({ page: client.authorized ? "workspace" : "login", client });
+		},
+		[watchConnection],
+	);
+	useEffect(() => {
+		let active = true;
+		void (async () => {
+			try {
+				const config = await configuredBackends();
+				if (!active) return;
+				setBackends(config.backends);
+				const remembered = rememberedSelection();
+				const backend = config.backends.find(
+					(item) =>
+						item.id === remembered?.id && item.scope === remembered.scope,
+				);
+				setServerId(backend?.id ?? config.defaultBackend);
+				if (backend && remembered) {
+					setPin(remembered.pin);
+					await openSelection({ backend, pin: remembered.pin });
+				} else setGate({ page: "connect" });
+			} catch (error) {
+				if (active) {
+					report(failure(error));
+					setGate({ page: "connect" });
+				}
+			}
+		})();
+		return () => {
+			active = false;
+			clientRef.current?.close();
+			clientRef.current = undefined;
+		};
+	}, [openSelection]);
 	function changeServer() {
-		setPrevious(gate);
-		setAddress(gate.server);
-		report("");
-		setGate({ page: "connect", server: "", mediaBase: "" });
-	}
-	function cancelServerChange() {
-		if (!previous) return;
-		report("");
-		setGate(previous);
-		setPrevious(undefined);
-	}
-	const connect = async () => {
-		const next = await verifyServer(address.trim());
-		if (previous?.server !== next.server && (previous || rememberedServer())) {
-			drafts.current = new Map();
-			setAttachmentDrafts({});
-			history.replaceState(null, "", location.pathname);
-		}
-		rememberServer(next.server);
-		setPrevious(undefined);
-		setGate(next);
-	};
-	const signIn = async (form: HTMLFormElement) => {
-		const { token, name } = Object.fromEntries(new FormData(form));
-		form.reset();
-		await api("login", gate.server, {
-			token,
-			name: String(name).trim() || "Web browser",
+		const client = clientRef.current;
+		if (!client) return;
+		setPrevious({
+			selection: client.selection,
+			wasDisconnected: gate.page === "reconnect",
 		});
-		setGate({ ...gate, page: "workspace" });
-	};
+		setServerId(client.selection.backend.id);
+		setPin(client.selection.pin);
+		client.close();
+		clearIncompleteUploads();
+		clientRef.current = undefined;
+		report("");
+		setGate({ page: "connect" });
+	}
+	async function connect() {
+		const backend = backends.find(({ id }) => id === serverId);
+		if (!backend) throw new Error("Choose a configured trusted backend.");
+		const next = { backend, pin: pin.trim().toLowerCase() };
+		await openSelection(next, () => {
+			if (previous && selectionKey(previous.selection) !== selectionKey(next)) {
+				// Never apply a different responder's route or draft to the verified workspace.
+				history.replaceState(null, "", location.pathname);
+				clearDrafts();
+			}
+		});
+		rememberSelection(next);
+		setPrevious(undefined);
+	}
+	async function cancelServerChange() {
+		if (!previous || restoringPrevious) return;
+		report("");
+		if (previous.wasDisconnected) {
+			clientRef.current?.close();
+			const client = new WorkspaceClient(previous.selection);
+			clientRef.current = client;
+			setGate({ page: "reconnect", client });
+			setPrevious(undefined);
+			return;
+		}
+		setRestoringPrevious(true);
+		try {
+			await openSelection(previous.selection);
+			setPrevious(undefined);
+		} catch (error) {
+			report(failure(error));
+		} finally {
+			setRestoringPrevious(false);
+		}
+	}
+	async function signIn(form: HTMLFormElement) {
+		if (gate.page !== "login") return;
+		const { client } = gate;
+		const token = form.elements.namedItem("token");
+		const name = form.elements.namedItem("name");
+		if (
+			!(token instanceof HTMLInputElement) ||
+			!(name instanceof HTMLInputElement)
+		)
+			return;
+		watchConnection(client);
+		const enrollment = client.enroll(
+			token.value,
+			name.value.trim() || "Web browser",
+		);
+		form.reset();
+		await enrollment;
+		if (clientRef.current !== client || client.signal.aborted) return;
+		setGate({ page: "workspace", client });
+	}
+	const currentServer = gate.page === "workspace" ? gate.client : undefined;
+	const reportWorkspace = useCallback(
+		(detail: string) => {
+			if (clientRef.current === currentServer && !currentServer?.signal.aborted)
+				report(detail);
+		},
+		[currentServer],
+	);
 	return (
 		<>
 			{gate.page !== "workspace" && (
@@ -2474,12 +2664,12 @@ function App() {
 			>
 				{gate.page === "workspace" && (
 					<Workspace
-						key={gate.server}
-						server={gate.server}
-						mediaBase={gate.mediaBase}
+						key={gate.client.key}
+						server={gate.client}
+						mediaClient={gate.client}
 						attachmentDrafts={attachmentDrafts}
 						setAttachmentDrafts={setAttachmentDrafts}
-						report={report}
+						report={reportWorkspace}
 						expire={expire}
 						drafts={drafts.current}
 						changeServer={changeServer}
@@ -2492,16 +2682,36 @@ function App() {
 				)}
 				{gate.page === "connect" && (
 					<ConnectScreen
-						address={address}
-						changeAddress={setAddress}
-						busy={busy}
+						backends={backends}
+						selected={serverId}
+						pin={pin}
+						choose={(id) => {
+							setServerId(id);
+							setPin(
+								id === previous?.selection.backend.id
+									? previous.selection.pin
+									: "",
+							);
+						}}
+						updatePin={setPin}
+						busy={busy || restoringPrevious}
 						submit={submit(connect)}
-						cancel={previous ? cancelServerChange : undefined}
+						cancel={previous ? () => void cancelServerChange() : undefined}
+					/>
+				)}
+				{gate.page === "reconnect" && (
+					<ReconnectScreen
+						backend={gate.client.selection.backend}
+						busy={busy}
+						changeServer={changeServer}
+						submit={submit(async () => {
+							await openSelection(gate.client.selection);
+						})}
 					/>
 				)}
 				{gate.page === "login" && (
 					<LoginScreen
-						server={gate.server}
+						backend={gate.client.selection.backend}
 						busy={busy}
 						submit={submit(signIn)}
 						changeServer={changeServer}

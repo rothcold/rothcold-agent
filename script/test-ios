@@ -1,0 +1,22 @@
+#!/bin/sh
+# Test production Swift/UniFFI against a normal server, optionally in a disposable iPhone simulator.
+set -eu
+case $# in
+    0|1) ;;
+    *) echo 'Usage: script/test-ios [disposable-simulator-UDID]' >&2; exit 2 ;;
+esac
+cd "$(dirname "$0")/.."
+export PATH="$(dirname "$(rustup which cargo)"):$PATH"
+if [ "$#" -eq 0 ]; then script/ios-core --host-only; else script/ios-core; fi
+cargo test --locked --manifest-path mobile/core/Cargo.toml --target-dir mobile/core/target
+cargo build --locked --manifest-path server/Cargo.toml --target-dir server/target --bin rothcold-agent --example noise-fixture
+out="$PWD/mobile/core/target/ios-native-tests"
+generated="$PWD/mobile/ios/Generated"
+xcrun swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
+    -I "$generated" -Xcc "-fmodule-map-file=$generated/rothcold_mobileFFI.modulemap" \
+    "$generated/rothcold_mobile.swift" mobile/ios/App/NativeAPI.swift mobile/ios/App/NoiseSocket.swift \
+    mobile/ios/App/NoiseMessages.swift mobile/ios/App/NoiseFiles.swift \
+    tests/ios-native.swift mobile/core/target/debug/librothcold_mobile.a -o "$out"
+artifacts="$PWD/mobile/core/target/ios-evidence-$(date +%Y%m%d-%H%M%S)-$$"
+python3 -B tests/ios_ingress.py "$PWD/server/target/debug/rothcold-agent" "$out" \
+    "$PWD/server/target/debug/examples/noise-fixture" "$artifacts" "$@"

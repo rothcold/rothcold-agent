@@ -79,12 +79,32 @@ function publicIngress(tls, webPort) {
 		upstream.on("error", () => socket.destroy());
 		upstream.end();
 	});
+	function tunnel(path) {
+		const last = Array.from(tunnels).filter(([, item]) => item.path === path).at(-1);
+		assert(last, `No active TLS tunnel for ${path}`);
+		return last;
+	}
 	return {
 		edge,
+		async dropReceipt(path, committed) {
+			const [socket, { peer }] = tunnel(path);
+			// A turn shares its serial link with reads. Forward their replies until
+			// the independent native observer sees this turn, then drop its receipt.
+			peer.unpipe(socket);
+			const deadline = setTimeout(() => peer.destroy(new Error("Turn did not commit before disconnect")), 5000);
+			try {
+				for await (const bytes of peer) {
+					if (await committed()) return;
+					await new Promise((resolve, reject) => socket.write(bytes, error => error ? reject(error) : resolve()));
+				}
+				throw new Error("TLS tunnel closed before the observed commit");
+			} finally {
+				clearTimeout(deadline);
+				socket.destroy();
+			}
+		},
 		hold(path) {
-			const last = Array.from(tunnels).filter(([, item]) => item.path === path).at(-1);
-			assert(last, `No active TLS tunnel for ${path}`);
-			const [socket, { peer }] = last;
+			const [socket, { peer }] = tunnel(path);
 			peer.pause();
 			const drop = () => socket.destroy();
 			drop.resume = () => peer.resume();
@@ -227,7 +247,7 @@ async function main() {
 		assert.equal(await checkUpgrade(origin, cert, "/noise/a", { Origin: origin }), 101);
 		if (process.env.SHOTS) await mkdir(process.env.SHOTS, { recursive: true });
 		browser = await chromium.launch({ executablePath: process.env.CHROMIUM, args: [`--ignore-certificate-errors-spki-list=${spki}`] });
-		const primary = await browser.newContext({ viewport: { width: 1100, height: 820 } });
+		const primary = await browser.newContext({ viewport: { width: 1100, height: 820 }, colorScheme: "dark" });
 		const page = await primary.newPage();
 		await page.addInitScript(() => {
 			const revoke = URL.revokeObjectURL;
@@ -408,9 +428,7 @@ async function main() {
 		assert.match(oldURL, /^blob:/);
 		const submitted = "The browser must not repeat this change across transport loss.";
 		await reply.fill(submitted);
-		const send = await ingress.hold("/noise/a");
-		await reply.press("Enter");
-		async function history() {
+		const history = async () => {
 			const items = [];
 			let after = null;
 			do {
@@ -419,19 +437,11 @@ async function main() {
 				after = page.next;
 			} while (after !== null);
 			return items;
-		}
-		await new Promise((resolve, reject) => {
-			const deadline = Date.now() + 5000;
-			async function attempt() {
-				try {
-					if ((await history()).some((item) => item.text === submitted)) resolve();
-					else if (Date.now() > deadline) reject(new Error("Held reply did not reach the real workspace"));
-					else setTimeout(attempt, 70);
-				} catch (error) { reject(error); }
-			}
-			void attempt();
-		});
-		send();
+		};
+		await Promise.all([
+			ingress.dropReceipt("/noise/a", async () => (await history()).some((item) => item.text === submitted)),
+			reply.press("Enter"),
+		]);
 		await page.getByRole("heading", { name: "Connection lost" }).waitFor();
 		await page.getByRole("status").filter({ hasText: "may have committed" }).waitFor();
 		await page.waitForFunction((url) => window.revokedMedia.includes(url), oldURL);

@@ -69,6 +69,7 @@ async function exerciseSlashMenu(page, form, mobile, { post, pages }, hash) {
       await page.setViewportSize({width:375,height:760});
       await cdp.send('Emulation.setTouchEmulationEnabled', {enabled:true});
     }
+    await form.locator('[role=textbox][contenteditable=true]').waitFor();
     await editor.pressSequentially('/');
     await status.waitFor();
     assert.equal(await menu.getByRole('option', {name:/^\/(approve|deny)$/}).count(), 0);
